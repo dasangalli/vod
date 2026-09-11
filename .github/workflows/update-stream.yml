@@ -47,4 +47,4 @@ jobs:
           scp -o StrictHostKeyChecking=no stream_${{ github.event.inputs.stream_id }}.conf ${VM_USER}@${VM_HOST}:~/vod/
           
           # Riavvia Nginx sulla VM
-          ssh -o StrictHostKeyChecking=no ${VM_USER}@${VM_HOST} 'docker compose -f ~/docker-compose-vod.yml restart nginx'
+          ssh -o StrictHostKeyChecking=no ${VM_USER}@${VM_HOST} 'sudo docker compose -f ~/docker-compose-vod.yml restart nginx'
