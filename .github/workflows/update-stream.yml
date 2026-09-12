@@ -31,7 +31,7 @@ jobs:
 
       - name: Run sniffer script
         run: |
-          python sniffer-vod.py "${{ github.event.inputs.target_url }}" -i "${{ github.event.inputs.stream_id }}" --worker-url "https://vod-proxy-worker.mondochar.workers.dev" --conf-dir . --out-dir .
+          python sniffer-vod.py "${{ github.event.inputs.target_url }}" -i "${{ github.event.inputs.stream_id }}" --conf-dir . --out-dir .
 
       - name: Deploy to VM via SSH
         env:
@@ -43,8 +43,6 @@ jobs:
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           
-          # Copia il file di configurazione specifico per l'ID inserito
           scp -o StrictHostKeyChecking=no stream_${{ github.event.inputs.stream_id }}.conf ${VM_USER}@${VM_HOST}:~/vod/
           
-          # Riavvia Nginx sulla VM
           ssh -o StrictHostKeyChecking=no ${VM_USER}@${VM_HOST} 'sudo docker compose -f ~/docker-compose-vod.yml restart nginx'
