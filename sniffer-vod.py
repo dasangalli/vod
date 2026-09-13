@@ -4,7 +4,6 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Playwright, Request, Response
 
 MANIFEST_MARKERS = (".m3u8", ".mpd")
@@ -50,8 +49,6 @@ class ManifestSniffer:
 def generate_stream_conf(stream_id: str, target_url: str) -> str:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     worker_url = "https://vod-proxy-worker.mondochar.workers.dev"
-    
-    # Calcola la base URL upstream per mappare automaticamente qualsiasi segmento relativo o assoluto
     base_target_url = target_url.rsplit('/', 1)[0] + '/'
 
     return f"""# =============================================================================
@@ -59,7 +56,6 @@ def generate_stream_conf(stream_id: str, target_url: str) -> str:
 #  Stream ID:      {stream_id}
 #  Data:           {timestamp}
 #  Manifest URL:   {target_url}
-#  Base Target:    {base_target_url}
 # =============================================================================
 
 location = /live/{stream_id}/playlist.m3u8 {{
@@ -100,6 +96,9 @@ INDEX_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>HLS Dynamic Web Player</title>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
@@ -124,7 +123,6 @@ INDEX_HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
 
     <script>
-        // Lista incorporata direttamente per evitare qualsiasi problema di fetch o caching
         const STREAMS = __STREAMS_JSON__;
         let hls = null;
 
@@ -132,8 +130,20 @@ INDEX_HTML_TEMPLATE = r"""<!DOCTYPE html>
             const select = document.getElementById('streamSelect');
             select.innerHTML = '';
             
+            // Supporto robusto sia per ?stream=1 che per /stream=1 o /1 nel pathname
             const urlParams = new URLSearchParams(window.location.search);
-            let activeStreamId = urlParams.get('stream') || (STREAMS.length > 0 ? STREAMS[0].id : '1');
+            let activeStreamId = urlParams.get('stream');
+
+            if (!activeStreamId) {
+                const match = window.location.pathname.match(/stream[=/-]?(\d+)/i) || window.location.pathname.match(/\/(\d+)/);
+                if (match) {
+                    activeStreamId = match[1];
+                }
+            }
+
+            if (!activeStreamId || !STREAMS.some(s => String(s.id) === String(activeStreamId))) {
+                activeStreamId = STREAMS.length > 0 ? STREAMS[0].id : '1';
+            }
 
             STREAMS.forEach(s => {
                 const option = document.createElement('option');
@@ -147,7 +157,7 @@ INDEX_HTML_TEMPLATE = r"""<!DOCTYPE html>
 
             select.addEventListener('change', (e) => {
                 const newId = e.target.value;
-                window.location.search = `?stream=${newId}`;
+                window.location.href = `/stream=${newId}`;
             });
 
             initPlayer(activeStreamId);
@@ -226,12 +236,9 @@ def run(playwright: Playwright, url: str, stream_id: str, proxy_server: str, con
     
     streams_data = [{"id": stream_id, "name": f"Canale {stream_id}", "url": f"/live/{stream_id}/playlist.m3u8"}]
     
-    # Inserisce i dati direttamente nel template HTML evitando fetch e problemi di cache
     final_html = INDEX_HTML_TEMPLATE.replace("__STREAMS_JSON__", json.dumps(streams_data))
     Path(out_dir, "index.html").write_text(final_html, encoding="utf-8")
     
-    Path(out_dir, "streams.json").write_text(json.dumps(streams_data, indent=2), encoding="utf-8")
-
     browser.close()
 
 def main() -> None:
@@ -248,4 +255,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
