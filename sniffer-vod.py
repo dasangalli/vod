@@ -4,6 +4,7 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Playwright, Request, Response
 
 MANIFEST_MARKERS = (".m3u8", ".mpd")
@@ -49,12 +50,16 @@ class ManifestSniffer:
 def generate_stream_conf(stream_id: str, target_url: str) -> str:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     worker_url = "https://vod-proxy-worker.mondochar.workers.dev"
+    
+    # Calcola la base URL upstream per mappare automaticamente qualsiasi segmento relativo o assoluto
+    base_target_url = target_url.rsplit('/', 1)[0] + '/'
 
     return f"""# =============================================================================
-#  stream_{stream_id}.conf - LOCATION INTEGRATA
+#  stream_{stream_id}.conf - LOCATION INTEGRATA (ROBUSTA)
 #  Stream ID:      {stream_id}
 #  Data:           {timestamp}
 #  Manifest URL:   {target_url}
+#  Base Target:    {base_target_url}
 # =============================================================================
 
 location = /live/{stream_id}/playlist.m3u8 {{
@@ -67,18 +72,18 @@ location = /live/{stream_id}/playlist.m3u8 {{
 
     sub_filter_once off;
     sub_filter_types application/vnd.apple.mpegurl application/x-mpegurl text/plain;
-    sub_filter "https://vixsrc.to/playlist/" "/live/{stream_id}/segment/";
-    sub_filter "https://vixsrc.to/" "/live/{stream_id}/segment/";
+    sub_filter "{base_target_url}" "/live/{stream_id}/";
+    sub_filter "https://vixsrc.to/" "/live/{stream_id}/";
 
     proxy_hide_header Access-Control-Allow-Origin;
     add_header Access-Control-Allow-Origin * always;
     add_header Cache-Control "no-cache, no-store, must-revalidate" always;
 }}
 
-location ~ ^/live/{stream_id}/segment/(.+)$ {{
+location ~ ^/live/{stream_id}/(.+)$ {{
     resolver 8.8.8.8 valid=30s ipv6=off;
     set $worker_url "{worker_url}";
-    set $segment_target "https://vixsrc.to/playlist/$1";
+    set $segment_target "{base_target_url}$1";
 
     proxy_set_header x-target-url $segment_target;
     proxy_pass $worker_url;
@@ -119,42 +124,33 @@ INDEX_HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
 
     <script>
+        // Lista incorporata direttamente per evitare qualsiasi problema di fetch o caching
+        const STREAMS = __STREAMS_JSON__;
         let hls = null;
 
-        async function loadStreams() {
-            try {
-                // CORRETTO: Uso del percorso assoluto /streams.json per evitare errori di contesto
-                const response = await fetch('/streams.json');
-                const streams = await response.json();
-                
-                const select = document.getElementById('streamSelect');
-                select.innerHTML = '';
-                
-                const urlParams = new URLSearchParams(window.location.search);
-                let activeStreamId = urlParams.get('stream') || (streams.length > 0 ? streams[0].id : '1');
+        function initApp() {
+            const select = document.getElementById('streamSelect');
+            select.innerHTML = '';
+            
+            const urlParams = new URLSearchParams(window.location.search);
+            let activeStreamId = urlParams.get('stream') || (STREAMS.length > 0 ? STREAMS[0].id : '1');
 
-                streams.forEach(s => {
-                    const option = document.createElement('option');
-                    option.value = s.id;
-                    option.textContent = s.name || `Canale ${s.id}`;
-                    if (String(s.id) === String(activeStreamId)) {
-                        option.selected = true;
-                    }
-                    select.appendChild(option);
-                });
+            STREAMS.forEach(s => {
+                const option = document.createElement('option');
+                option.value = s.id;
+                option.textContent = s.name || `Canale ${s.id}`;
+                if (String(s.id) === String(activeStreamId)) {
+                    option.selected = true;
+                }
+                select.appendChild(option);
+            });
 
-                select.addEventListener('change', (e) => {
-                    const newId = e.target.value;
-                    window.location.search = `?stream=${newId}`;
-                });
+            select.addEventListener('change', (e) => {
+                const newId = e.target.value;
+                window.location.search = `?stream=${newId}`;
+            });
 
-                initPlayer(activeStreamId);
-            } catch (err) {
-                console.error("Errore caricamento streams.json:", err);
-                const urlParams = new URLSearchParams(window.location.search);
-                const activeStreamId = urlParams.get('stream') || '1';
-                initPlayer(activeStreamId);
-            }
+            initPlayer(activeStreamId);
         }
 
         function initPlayer(streamId) {
@@ -173,6 +169,9 @@ INDEX_HTML_TEMPLATE = r"""<!DOCTYPE html>
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
                     video.play().catch(e => console.log("Autoplay bloccato:", e));
                 });
+                hls.on(Hls.Events.ERROR, function (event, data) {
+                    console.error("HLS Error:", data.type, data.details, data.fatal);
+                });
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                 video.src = videoSrc;
                 video.addEventListener('loadedmetadata', () => {
@@ -181,7 +180,7 @@ INDEX_HTML_TEMPLATE = r"""<!DOCTYPE html>
             }
         }
 
-        loadStreams();
+        initApp();
     </script>
 </body>
 </html>
@@ -224,10 +223,14 @@ def run(playwright: Playwright, url: str, stream_id: str, proxy_server: str, con
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     Path(conf_dir, f"stream_{stream_id}.conf").write_text(generate_stream_conf(stream_id, target_url), encoding="utf-8")
-    Path(out_dir, "index.html").write_text(INDEX_HTML_TEMPLATE, encoding="utf-8")
     
-    json_path = Path(out_dir, "streams.json")
-    json_path.write_text(json.dumps([{"id": stream_id, "name": f"Canale {stream_id}", "url": f"/live/{stream_id}/playlist.m3u8"}], indent=2), encoding="utf-8")
+    streams_data = [{"id": stream_id, "name": f"Canale {stream_id}", "url": f"/live/{stream_id}/playlist.m3u8"}]
+    
+    # Inserisce i dati direttamente nel template HTML evitando fetch e problemi di cache
+    final_html = INDEX_HTML_TEMPLATE.replace("__STREAMS_JSON__", json.dumps(streams_data))
+    Path(out_dir, "index.html").write_text(final_html, encoding="utf-8")
+    
+    Path(out_dir, "streams.json").write_text(json.dumps(streams_data, indent=2), encoding="utf-8")
 
     browser.close()
 
@@ -241,7 +244,8 @@ def main() -> None:
     args = parser.parse_args()
 
     with sync_playwright() as playwright:
-        run(playwright, args.url, args.stream_id, args.proxy, args.proxy and args.proxy, args.conf_dir, args.out_dir) if '--proxy' in sys.argv else run(playwright, args.url, args.stream_id, args.proxy, args.conf_dir, args.out_dir)
+        run(playwright, args.url, args.stream_id, args.proxy, args.conf_dir, args.out_dir)
 
 if __name__ == "__main__":
     main()
+
