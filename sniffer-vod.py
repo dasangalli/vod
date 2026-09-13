@@ -94,34 +94,94 @@ INDEX_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="it">
 <head>
     <meta charset="UTF-8">
-    <title>HLS Player Dinamico</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HLS Dynamic Web Player</title>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        body { background: #121212; color: #fff; font-family: sans-serif; text-align: center; margin: 0; padding: 20px; }
+        h2 { margin-top: 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        video { width: 100%; max-width: 800px; background: #000; border-radius: 8px; margin-top: 15px; }
+        .selector { margin: 20px 0; }
+        select { padding: 8px 12px; background: #222; color: #fff; border: 1px solid #444; border-radius: 4px; font-size: 16px; }
+        #source-info { font-size: 12px; color: #888; margin-top: 10px; }
+    </style>
 </head>
-<body style="background:#121212; color:#fff; text-align:center; padding-top:50px;">
-    <h2>HLS Player - Stream ID: <span id="sid">1</span></h2>
-    <video id="video" controls autoplay style="width:80%; max-width:800px;"></video>
+<body>
+    <div class="container">
+        <h2>HLS Live Web Player</h2>
+        <div class="selector">
+            <label for="streamSelect">STREAM ATTIVO: </label>
+            <select id="streamSelect"></select>
+        </div>
+        <video id="video" controls autoplay></video>
+        <div id="source-info">Sorgente HLS: <span id="srcPath">--</span></div>
+    </div>
+
     <script>
-        // Estrae l'ID dello stream dalla query string (es. ?stream=1) o dal percorso
-        const urlParams = new URLSearchParams(window.location.search);
-        let streamId = urlParams.get('stream') || '1';
-        
-        const pathMatch = window.location.search.match(/stream=([0-9]+)/) || window.location.pathname.match(/stream[=/]([0-9]+)/);
-        if (pathMatch) {
-            streamId = pathMatch[1];
+        let hls = null;
+
+        async function loadStreams() {
+            try {
+                // CORRETTO: Uso del percorso assoluto /streams.json per evitare errori di contesto
+                const response = await fetch('/streams.json');
+                const streams = await response.json();
+                
+                const select = document.getElementById('streamSelect');
+                select.innerHTML = '';
+                
+                const urlParams = new URLSearchParams(window.location.search);
+                let activeStreamId = urlParams.get('stream') || (streams.length > 0 ? streams[0].id : '1');
+
+                streams.forEach(s => {
+                    const option = document.createElement('option');
+                    option.value = s.id;
+                    option.textContent = s.name || `Canale ${s.id}`;
+                    if (String(s.id) === String(activeStreamId)) {
+                        option.selected = true;
+                    }
+                    select.appendChild(option);
+                });
+
+                select.addEventListener('change', (e) => {
+                    const newId = e.target.value;
+                    window.location.search = `?stream=${newId}`;
+                });
+
+                initPlayer(activeStreamId);
+            } catch (err) {
+                console.error("Errore caricamento streams.json:", err);
+                const urlParams = new URLSearchParams(window.location.search);
+                const activeStreamId = urlParams.get('stream') || '1';
+                initPlayer(activeStreamId);
+            }
         }
 
-        document.getElementById('sid').innerText = streamId;
-        const videoSrc = `/live/${streamId}/playlist.m3u8`;
-        console.log("Avvio riproduzione sorgente:", videoSrc);
+        function initPlayer(streamId) {
+            const videoSrc = `/live/${streamId}/playlist.m3u8`;
+            document.getElementById('srcPath').innerText = videoSrc;
+            console.log("Avvio riproduzione sorgente:", videoSrc);
 
-        const video = document.getElementById('video');
-        if (Hls.isSupported()) {
-            const hls = new Hls();
-            hls.loadSource(videoSrc);
-            hls.attachMedia(video);
-        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            video.src = videoSrc;
+            const video = document.getElementById('video');
+            if (Hls.isSupported()) {
+                if (hls) {
+                    hls.destroy();
+                }
+                hls = new Hls();
+                hls.loadSource(videoSrc);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    video.play().catch(e => console.log("Autoplay bloccato:", e));
+                });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = videoSrc;
+                video.addEventListener('loadedmetadata', () => {
+                    video.play().catch(e => console.log("Autoplay bloccato:", e));
+                });
+            }
         }
+
+        loadStreams();
     </script>
 </body>
 </html>
@@ -181,7 +241,7 @@ def main() -> None:
     args = parser.parse_args()
 
     with sync_playwright() as playwright:
-        run(playwright, args.url, args.stream_id, args.proxy, args.conf_dir, args.out_dir)
+        run(playwright, args.url, args.stream_id, args.proxy, args.proxy and args.proxy, args.conf_dir, args.out_dir) if '--proxy' in sys.argv else run(playwright, args.url, args.stream_id, args.proxy, args.conf_dir, args.out_dir)
 
 if __name__ == "__main__":
     main()
