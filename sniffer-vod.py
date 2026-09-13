@@ -46,50 +46,47 @@ class ManifestSniffer:
             "status": response.status if response else 200,
         }
 
-def generate_stream_conf(stream_id: str, target_url: str, proxy_server: str) -> str:
+def generate_stream_conf(stream_id: str, target_url: str) -> str:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+    worker_url = "https://vod-proxy-worker.mondochar.workers.dev"
+
     return f"""# =============================================================================
-#  stream_{stream_id}.conf - PROXY RESIDENZIALE INTEGRATO
+#  stream_{stream_id}.conf - LOCATION INTEGRATA
 #  Stream ID:      {stream_id}
 #  Data:           {timestamp}
 #  Manifest URL:   {target_url}
 # =============================================================================
 
-server {{
-    listen 80;
-    server_name _;
+location = /live/{stream_id}/playlist.m3u8 {{
+    resolver 8.8.8.8 valid=30s ipv6=off;
+    set $worker_url "{worker_url}";
 
-    location = /live/{stream_id}/playlist.m3u8 {{
-        resolver 8.8.8.8 valid=30s ipv6=off;
-        
-        proxy_pass {proxy_server};
-        proxy_set_header Host vixsrc.to;
-        proxy_ssl_server_name on;
-        proxy_set_header X-Target-URL "{target_url}";
+    proxy_set_header x-target-url "{target_url}";
+    proxy_pass $worker_url;
+    proxy_ssl_server_name on;
 
-        sub_filter_once off;
-        sub_filter_types application/vnd.apple.mpegurl application/x-mpegurl text/plain;
-        sub_filter "https://vixsrc.to/" "/live/{stream_id}/segment/";
-        sub_filter "http://vixsrc.to/" "/live/{stream_id}/segment/";
+    sub_filter_once off;
+    sub_filter_types application/vnd.apple.mpegurl application/x-mpegurl text/plain;
+    sub_filter "https://vixsrc.to/playlist/" "/live/{stream_id}/segment/";
+    sub_filter "https://vixsrc.to/" "/live/{stream_id}/segment/";
 
-        proxy_hide_header Access-Control-Allow-Origin;
-        add_header Access-Control-Allow-Origin * always;
-        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
-    }}
+    proxy_hide_header Access-Control-Allow-Origin;
+    add_header Access-Control-Allow-Origin * always;
+    add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+}}
 
-    location ~ ^/live/{stream_id}/segment/(.+)$ {{
-        resolver 8.8.8.8 valid=30s ipv6=off;
-        
-        proxy_pass {proxy_server};
-        proxy_set_header Host vixsrc.to;
-        proxy_ssl_server_name on;
-        proxy_set_header X-Target-URL "https://vixsrc.to/$1";
+location ~ ^/live/{stream_id}/segment/(.+)$ {{
+    resolver 8.8.8.8 valid=30s ipv6=off;
+    set $worker_url "{worker_url}";
+    set $segment_target "https://vixsrc.to/playlist/$1";
 
-        proxy_hide_header Access-Control-Allow-Origin;
-        add_header Access-Control-Allow-Origin * always;
-        add_header Cache-Control "max-age=600" always;
-    }}
+    proxy_set_header x-target-url $segment_target;
+    proxy_pass $worker_url;
+    proxy_ssl_server_name on;
+
+    proxy_hide_header Access-Control-Allow-Origin;
+    add_header Access-Control-Allow-Origin * always;
+    add_header Cache-Control "max-age=600" always;
 }}
 """
 
@@ -154,7 +151,7 @@ def run(playwright: Playwright, url: str, stream_id: str, proxy_server: str, con
     Path(conf_dir).mkdir(parents=True, exist_ok=True)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
-    Path(conf_dir, f"stream_{stream_id}.conf").write_text(generate_stream_conf(stream_id, target_url, proxy_server), encoding="utf-8")
+    Path(conf_dir, f"stream_{stream_id}.conf").write_text(generate_stream_conf(stream_id, target_url), encoding="utf-8")
     Path(out_dir, "index.html").write_text(INDEX_HTML_TEMPLATE, encoding="utf-8")
     
     json_path = Path(out_dir, "streams.json")
@@ -166,7 +163,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("url", help="URL di streaming")
     parser.add_argument("--stream-id", "-i", default="1")
-    parser.add_argument("--proxy", required=True, help="Indirizzo proxy residenziale (es. http://ip:porta)")
+    parser.add_argument("--proxy", required=True, help="Indirizzo proxy (es. socks4://ip:porta)")
     parser.add_argument("--conf-dir", default="./conf.d")
     parser.add_argument("--out-dir", default="./www")
     args = parser.parse_args()
