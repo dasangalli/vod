@@ -94,15 +94,27 @@ INDEX_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="it">
 <head>
     <meta charset="UTF-8">
-    <title>HLS Player</title>
+    <title>HLS Player Dinamico</title>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
 <body style="background:#121212; color:#fff; text-align:center; padding-top:50px;">
-    <h2>HLS Player</h2>
+    <h2>HLS Player - Stream ID: <span id="sid">1</span></h2>
     <video id="video" controls autoplay style="width:80%; max-width:800px;"></video>
     <script>
+        // Estrae l'ID dello stream dalla query string (es. ?stream=1) o dal percorso
+        const urlParams = new URLSearchParams(window.location.search);
+        let streamId = urlParams.get('stream') || '1';
+        
+        const pathMatch = window.location.search.match(/stream=([0-9]+)/) || window.location.pathname.match(/stream[=/]([0-9]+)/);
+        if (pathMatch) {
+            streamId = pathMatch[1];
+        }
+
+        document.getElementById('sid').innerText = streamId;
+        const videoSrc = `/live/${streamId}/playlist.m3u8`;
+        console.log("Avvio riproduzione sorgente:", videoSrc);
+
         const video = document.getElementById('video');
-        const videoSrc = '/live/1/playlist.m3u8';
         if (Hls.isSupported()) {
             const hls = new Hls();
             hls.loadSource(videoSrc);
