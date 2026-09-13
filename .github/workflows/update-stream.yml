@@ -1,19 +1,23 @@
-name: Aggiorna Stream VOD Manuale
+name: Aggiorna Stream VOD su VM
 
 on:
   workflow_dispatch:
     inputs:
       target_url:
-        description: 'URL della pagina di streaming (es. https://vixsrc.to/movie/7288/)'
+        description: 'URL di streaming (es. https://vixsrc.to/movie/7288/)'
         required: true
         default: 'https://vixsrc.to/movie/7288/'
       stream_id:
-        description: 'ID numerico o nome del canale (es. 1, 2, cinema)'
+        description: 'ID dello stream'
         required: true
         default: '1'
+      proxy:
+        description: 'Proxy residenziale (es. http://ip:porta o socks5://ip:porta)'
+        required: true
+        default: 'http://83.56.15.57:5678'
 
 jobs:
-  refresh-stream:
+  deploy-and-sniff:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -24,25 +28,24 @@ jobs:
           SSH_PRIVATE_KEY: ${{ secrets.VM_SSH_KEY }}
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
+          TARGET_URL: ${{ github.event.inputs.target_url }}
+          STREAM_ID: ${{ github.event.inputs.stream_id }}
+          PROXY: ${{ github.event.inputs.proxy }}
         run: |
           mkdir -p ~/.ssh
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           
-          # Copia lo script aggiornato sulla VM
-          ssh -o StrictHostKeyChecking=no ${VM_USER}@${VM_HOST} 'mkdir -p ~/vod'
+          ssh -o StrictHostKeyChecking=no ${VM_USER}@${VM_HOST} 'mkdir -p ~/vod/conf.d ~/vod/www'
           scp -o StrictHostKeyChecking=no sniffer-vod.py ${VM_USER}@${VM_HOST}:~/vod/
           
-          # Esegue Playwright e lo sniffer direttamente sulla VM (stesso IP)
-          ssh -o StrictHostKeyChecking=no ${VM_USER}@${VM_HOST} '
+          ssh -o StrictHostKeyChecking=no ${VM_USER}@${VM_HOST} "
             cd ~/vod
             python3 -m pip install --user playwright > /dev/null 2>&1 || true
-            export PATH=$PATH:~/.local/bin
+            export PATH=\$PATH:~/.local/bin
             python3 -m playwright install chromium --with-deps > /dev/null 2>&1 || true
             
-            # Genera la configurazione usando l'IP e l'ambiente della VM
-            python3 sniffer-vod.py "${{ github.event.inputs.target_url }}" -i "${{ github.event.inputs.stream_id }}" --conf-dir . --out-dir .
+            python3 sniffer-vod.py '$TARGET_URL' --stream-id '$STREAM_ID' --proxy '$PROXY' --conf-dir ./conf.d --out-dir ./www
             
-            # Riavvia Nginx per applicare la nuova configurazione
             sudo docker compose -f ~/docker-compose-vod.yml restart nginx
-          '
+          "
