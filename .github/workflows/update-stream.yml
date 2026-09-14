@@ -36,16 +36,14 @@ jobs:
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           
-          ssh -o StrictHostKeyChecking=no ${VM_USER}@${VM_HOST} 'mkdir -p ~/vod/conf.d ~/vod/www'
-          scp -o StrictHostKeyChecking=no sniffer-vod.py ${VM_USER}@${VM_HOST}:~/vod/
+          scp -o StrictHostKeyChecking=no sniffer-vod.py ${VM_USER}@${VM_HOST}:~/
           
           ssh -o StrictHostKeyChecking=no ${VM_USER}@${VM_HOST} "
-            cd ~/vod
             python3 -m pip install --user playwright > /dev/null 2>&1 || true
             export PATH=\$PATH:~/.local/bin
             python3 -m playwright install chromium --with-deps > /dev/null 2>&1 || true
             
-            python3 sniffer-vod.py '$TARGET_URL' --stream-id '$STREAM_ID' --proxy '$PROXY' --conf-dir ./conf.d --out-dir ./www
+            python3 sniffer-vod.py '$TARGET_URL' --stream-id '$STREAM_ID' --proxy '$PROXY' --conf-dir ./vod --out-dir ./www-vod
             
             sudo docker compose -f ~/docker-compose-vod.yml restart nginx
           "
