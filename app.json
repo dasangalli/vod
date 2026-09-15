@@ -1,7 +1,8 @@
 {
   "expo": {
     "name": "HLS Stream Player",
-    "slug": "hls-stream-player",
+    "slug": "vodui",
+    "owner": "sangaz",
     "version": "1.0.0",
     "orientation": "default",
     "icon": "./assets/icon.png",
@@ -13,14 +14,19 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.tuonome.hlsstreamplayer"
+      "bundleIdentifier": "com.sangaz.vodui"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#121212"
       },
-      "package": "com.tuonome.hlsstreamplayer"
+      "package": "com.sangaz.vodui"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "f315fa56-f217-4174-9540-686e75096b81"
+      }
     },
     "plugins": [
       [
