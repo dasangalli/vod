@@ -1,0 +1,25 @@
+{
+  "cli": {
+    "version": ">= 10.0.0"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": { "image": "latest" },
+      "ios": { "image": "latest" }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": { "image": "latest" },
+      "ios": { "image": "latest" }
+    },
+    "production": {
+      "android": { "image": "latest" },
+      "ios": { "image": "latest" }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}
