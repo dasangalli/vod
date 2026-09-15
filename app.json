@@ -14,13 +14,22 @@
       "bundleIdentifier": "com.sangaz.vodui"
     },
     "android": {
-      "package": "com.sangaz.vodui",
-      "usesCleartextTraffic": true
+      "package": "com.sangaz.vodui"
     },
     "extra": {
       "eas": {
         "projectId": "f315fa56-f217-4174-9540-686e75096b81"
       }
-    }
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ]
   }
 }
