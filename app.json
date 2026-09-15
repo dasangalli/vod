@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "HLS Stream Player",
+    "name": "VOD UI",
     "slug": "vodui",
     "owner": "sangaz",
     "version": "1.0.0",
@@ -21,21 +21,13 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#121212"
       },
-      "package": "com.sangaz.vodui"
+      "package": "com.sangaz.vodui",
+      "usesCleartextTraffic": true
     },
     "extra": {
       "eas": {
         "projectId": "f315fa56-f217-4174-9540-686e75096b81"
       }
-    },
-    "plugins": [
-      [
-        "expo-video",
-        {
-          "supportsBackgroundPlayback": true,
-          "supportsPictureInPicture": true
-        }
-      ]
-    ]
+    }
   }
 }
