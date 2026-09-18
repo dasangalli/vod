@@ -1,17 +1,47 @@
-import React from 'react';
-import { StyleSheet, SafeAreaView, StatusBar, Linking } from 'react-native';
+import React, { useRef, useEffect } from 'react';
+import { StyleSheet, SafeAreaView, StatusBar, BackHandler, Linking } from 'react-native';
 import { WebView } from 'react-native-webview';
 
 export default function App() {
+  const webViewRef = useRef(null);
+
+  // Gestione del tasto "Indietro" su Android per navigare nella cronologia della WebView
+  useEffect(() => {
+    const backAction = () => {
+      if (webViewRef.current) {
+        // Torna indietro nella cronologia della WebView
+        webViewRef.current.goBack();
+        return true; // Evita la chiusura dell'app
+      }
+      return false;
+    };
+
+    const backHandler = BackHandler.addEventListener(
+      'hardwareBackPress',
+      backAction
+    );
+
+    return () => backHandler.remove();
+  }, []);
+
   const handleShouldStartLoad = (event) => {
     const { url } = event;
     
-    // Permette solo i normali link web HTTP e HTTPS
+    // Permetti il traffico HTTP/HTTPS principale
     if (url.startsWith('http://') || url.startsWith('https://')) {
+      
+      // FILTRO ANTI-PUBBLICITÀ / POPUP: 
+      // Puoi bloccare domini di sponsor/adv noti se compaiono spesso
+      const blockedKeywords = ['ads', 'popup', 'banner', 'track', 'analytic'];
+      if (blockedKeywords.some(keyword => url.includes(keyword))) {
+        console.log('Pubblicità bloccata:', url);
+        return false;
+      }
+
       return true;
     }
     
-    // Se il sito prova ad aprire app esterne (store, social, ecc.), prova a gestirle o le blocca
+    // Gestione di schemi particolari (es. mailto, tel, ecc.)
     try {
       Linking.canOpenURL(url).then((supported) => {
         if (supported) {
@@ -22,7 +52,6 @@ export default function App() {
       console.log('Impossibile aprire il link:', e);
     }
     
-    // Impedisce alla WebView di caricare schemi sconosciuti facendo fallire la pagina
     return false;
   };
 
@@ -30,12 +59,14 @@ export default function App() {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#121212" />
       <WebView 
+        ref={webViewRef}
         source={{ uri: 'http://129.153.47.200:8080' }}
         style={styles.webview}
         javaScriptEnabled={true}
         domStorageEnabled={true}
         allowsInlineMediaPlayback={true}
         mediaPlaybackRequiresUserAction={false}
+        setSupportMultipleWindows={false} // Fondamentale: apre i link con target="_blank" dentro la stessa WebView senza creare finestre pop-up
         originWhitelist={['http://*', 'https://*']}
         onShouldStartLoadWithRequest={handleShouldStartLoad}
       />
