@@ -2,7 +2,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useKeepAwake } from 'expo-keep-awake';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { Stack, router, useLocalSearchParams } from 'expo-router';
-import { VideoView, useVideoPlayer } from 'expo-video';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -16,6 +15,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { WebView } from 'react-native-webview';
 
 // ---------------------------------------------------------------------------
 // Configurazione
@@ -36,12 +36,13 @@ export default function PlayerScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const playlistUrl = `${BASE_URL}/live/${id}/playlist.m3u8`;
 
+  const webviewRef = useRef<WebView>(null);
+
   // Stati UI
   const [buffering, setBuffering]         = useState(true);
   const [error, setError]                 = useState(false);
   const [retryCount, setRetryCount]       = useState(0);
   const [showControls, setShowControls]   = useState(true);
-  const [sourceKey, setSourceKey]         = useState(0);
   const [isPlaying, setIsPlaying]         = useState(true);
   const [currentTime, setCurrentTime]     = useState(0);
   const [duration, setDuration]           = useState(0);
@@ -49,21 +50,20 @@ export default function PlayerScreen() {
   // Modal Audio & Sottotitoli
   const [showTracksModal, setShowTracksModal] = useState(false);
   const [audioTracks, setAudioTracks]         = useState<any[]>([]);
-  const [selectedAudio, setSelectedAudio]     = useState<any>(null);
+  const [selectedAudioId, setSelectedAudioId] = useState<number | null>(null);
   const [subTracks, setSubTracks]             = useState<any[]>([]);
-  const [selectedSub, setSelectedSub]         = useState<any>(null);
+  const [selectedSubId, setSelectedSubId]     = useState<number | null>(null);
 
   // Feedback Seek (+10s / -10s)
   const [seekFeedbackText, setSeekFeedbackText] = useState<string | null>(null);
 
-  // Ref per logica persistente
+  // Ref per Watchdog
   const lastTimeRef      = useRef<number>(0);
   const lastProgressRef  = useRef<number>(Date.now());
   const lastReloadRef    = useRef<number>(0);
   const bufferingRef     = useRef<boolean>(true);
   const errorRef         = useRef<boolean>(false);
   const retryCountRef    = useRef<number>(0);
-  const sourceKeyRef     = useRef<number>(0);
 
   // Ref Timer
   const watchdogRef      = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -74,14 +74,7 @@ export default function PlayerScreen() {
   const seekIntervalRef  = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // -------------------------------------------------------------------------
-  // 1. Inizializzazione Player
-  // -------------------------------------------------------------------------
-  const player = useVideoPlayer({ uri: playlistUrl }, (p) => {
-    p.play();
-  });
-
-  // -------------------------------------------------------------------------
-  // 2. Orientamento e Tasto Back Hardware
+  // 1. Orientamento & Tasto Back Hardware
   // -------------------------------------------------------------------------
   useEffect(() => {
     if (!isTV) ScreenOrientation.unlockAsync();
@@ -103,87 +96,107 @@ export default function PlayerScreen() {
   }, [showTracksModal]);
 
   // -------------------------------------------------------------------------
-  // 3. Sincronizzazione Tracce Audio e Sottotitoli
+  // 2. Comunicazione JS: Ricezione Eventi da HLS.js (WebView)
   // -------------------------------------------------------------------------
-  const syncTracks = useCallback(() => {
-    if (!player) return;
+  const handleWebViewMessage = (eventData: string) => {
     try {
-      const audios = player.availableAudioTracks || [];
-      const subs = player.availableSubtitleTracks || [];
+      const msg = JSON.parse(eventData);
 
-      setAudioTracks(audios);
-      setSubTracks(subs);
+      switch (msg.type) {
+        case 'STATUS':
+          if (msg.status === 'readyToPlay') {
+            bufferingRef.current = false;
+            errorRef.current = false;
+            setBuffering(false);
+            setError(false);
+            lastProgressRef.current = Date.now();
+            retryCountRef.current = 0;
+          } else if (msg.status === 'loading') {
+            bufferingRef.current = true;
+            setBuffering(true);
+          } else if (msg.status === 'error') {
+            errorRef.current = true;
+            setError(true);
+            setBuffering(false);
+            scheduleRetry();
+          }
+          break;
 
-      if (player.audioTrack) {
-        setSelectedAudio(player.audioTrack);
-      } else if (audios.length > 0) {
-        setSelectedAudio(audios[0]);
+        case 'TIME_UPDATE':
+          setCurrentTime(msg.currentTime || 0);
+          if (msg.duration) setDuration(msg.duration);
+          setIsPlaying(!msg.paused);
+          break;
+
+        case 'PLAYING_CHANGE':
+          setIsPlaying(msg.isPlaying);
+          break;
+
+        case 'AUDIO_TRACKS':
+          setAudioTracks(msg.tracks || []);
+          if (msg.current !== undefined && msg.current !== null) {
+            setSelectedAudioId(msg.current);
+          }
+          break;
+
+        case 'AUDIO_SWITCHED':
+          setSelectedAudioId(msg.id);
+          break;
+
+        case 'SUBTITLE_TRACKS':
+          setSubTracks(msg.tracks || []);
+          if (msg.current !== undefined && msg.current !== null) {
+            setSelectedSubId(msg.current);
+          }
+          break;
+
+        case 'SUBTITLE_SWITCHED':
+          setSelectedSubId(msg.id);
+          break;
+
+        default:
+          break;
       }
-
-      setSelectedSub(player.subtitleTrack || null);
     } catch (e) {
-      console.log('Errore sync tracce:', e);
+      console.log('Errore parsing messaggio WebView:', e);
     }
-  }, [player]);
-
-  // Nomi per le tracce con fallback
-  const getAudioTrackLabel = (track: any, index: number) => {
-    if (!track) return `Audio ${index + 1}`;
-    return track.label || track.language || track.id || `Audio ${index + 1}`;
-  };
-
-  const getSubTrackLabel = (track: any, index: number) => {
-    if (!track) return `Sottotitolo ${index + 1}`;
-    return track.label || track.language || track.id || `Sottotitolo ${index + 1}`;
   };
 
   // -------------------------------------------------------------------------
-  // 4. Listener di Stato Player
+  // 3. Comandi inviati alla WebView
   // -------------------------------------------------------------------------
-  useEffect(() => {
-    const statusSub = player.addListener('statusChange', (status) => {
-      if (status.status === 'readyToPlay') {
-        bufferingRef.current = false;
-        errorRef.current = false;
-        setBuffering(false);
-        setError(false);
-        setIsPlaying(player.playing);
-        lastProgressRef.current = Date.now();
-        retryCountRef.current = 0;
-        syncTracks();
-      }
-      if (status.status === 'loading') {
-        bufferingRef.current = true;
-        setBuffering(true);
-      }
-      if (status.status === 'error') {
-        errorRef.current = true;
-        setError(true);
-        setBuffering(false);
-        scheduleRetry();
-      }
-    });
+  const runJS = (code: string) => {
+    webviewRef.current?.injectJavaScript(`${code}; true;`);
+  };
 
-    const timeSub = player.addListener('timeUpdate', (event) => {
-      setCurrentTime(event.currentTime);
-      if (player.duration) setDuration(player.duration);
-      // Aggiorna le tracce se non ancora rilevate
-      if (audioTracks.length === 0) syncTracks();
-    });
+  const togglePlay = () => {
+    showControlsTemporarily();
+    runJS('window.togglePlay()');
+  };
 
-    const playingSub = player.addListener('playingChange', (event) => {
-      setIsPlaying(event.isPlaying);
-    });
+  const seekBy = (seconds: number) => {
+    runJS(`window.seekBy(${seconds})`);
 
-    return () => {
-      statusSub.remove();
-      timeSub.remove();
-      playingSub.remove();
-    };
-  }, [player, syncTracks, audioTracks.length]);
+    const sign = seconds > 0 ? '+' : '';
+    setSeekFeedbackText(`${sign}${seconds}s`);
+    if (seekTimerRef.current) clearTimeout(seekTimerRef.current);
+    seekTimerRef.current = setTimeout(() => setSeekFeedbackText(null), 800);
+
+    showControlsTemporarily();
+  };
+
+  const selectAudioTrack = (index: number) => {
+    runJS(`window.setAudioTrack(${index})`);
+    setSelectedAudioId(index);
+  };
+
+  const selectSubtitleTrack = (index: number) => {
+    runJS(`window.setSubtitleTrack(${index})`);
+    setSelectedSubId(index);
+  };
 
   // -------------------------------------------------------------------------
-  // 5. Watchdog e Auto-Retry
+  // 4. Watchdog e Auto-Retry
   // -------------------------------------------------------------------------
   const forceReload = () => {
     errorRef.current = false;
@@ -192,8 +205,7 @@ export default function PlayerScreen() {
     setBuffering(true);
     lastProgressRef.current = Date.now();
     lastTimeRef.current = 0;
-    sourceKeyRef.current += 1;
-    setSourceKey(sourceKeyRef.current);
+    runJS(`window.loadStream("${playlistUrl}")`);
   };
 
   const scheduleRetry = () => {
@@ -207,19 +219,12 @@ export default function PlayerScreen() {
   };
 
   useEffect(() => {
-    player.replace({ uri: playlistUrl });
-    player.play();
-  }, [sourceKey]);
-
-  useEffect(() => {
     watchdogRef.current = setInterval(() => {
-      if (!player || errorRef.current || !player.playing) return;
+      if (errorRef.current || !isPlaying) return;
 
-      const cTime = player.currentTime;
       const now = Date.now();
-
-      if (cTime !== lastTimeRef.current) {
-        lastTimeRef.current = cTime;
+      if (currentTime !== lastTimeRef.current) {
+        lastTimeRef.current = currentTime;
         lastProgressRef.current = now;
         if (bufferingRef.current) {
           bufferingRef.current = false;
@@ -242,10 +247,10 @@ export default function PlayerScreen() {
       if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
       stopSeeking();
     };
-  }, [player]);
+  }, [currentTime, isPlaying]);
 
   // -------------------------------------------------------------------------
-  // 6. Gestione Controlli Visivi e Seek
+  // 5. Gestione Pressione Prolungata e Controlli
   // -------------------------------------------------------------------------
   const showControlsTemporarily = () => {
     setShowControls(true);
@@ -253,30 +258,6 @@ export default function PlayerScreen() {
     controlsTimerRef.current = setTimeout(() => {
       if (!showTracksModal) setShowControls(false);
     }, CONTROLS_HIDE_DELAY);
-  };
-
-  const togglePlay = () => {
-    showControlsTemporarily();
-    if (player.playing) {
-      player.pause();
-      setIsPlaying(false);
-    } else {
-      player.play();
-      setIsPlaying(true);
-    }
-  };
-
-  const seekBy = (seconds: number) => {
-    if (!player) return;
-    const target = Math.max(0, player.currentTime + seconds);
-    player.currentTime = target;
-
-    const sign = seconds > 0 ? '+' : '';
-    setSeekFeedbackText(`${sign}${seconds}s`);
-    if (seekTimerRef.current) clearTimeout(seekTimerRef.current);
-    seekTimerRef.current = setTimeout(() => setSeekFeedbackText(null), 800);
-
-    showControlsTemporarily();
   };
 
   const startSeeking = (seconds: number) => {
@@ -302,21 +283,170 @@ export default function PlayerScreen() {
   };
 
   // -------------------------------------------------------------------------
-  // 7. Render Interfaccia
+  // 6. Codice HTML5 + hls.js iniettato nella WebView
+  // -------------------------------------------------------------------------
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html lang="it">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+      <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+      <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; background-color: #000; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background-color: #000; }
+        video { width: 100%; height: 100%; object-fit: contain; background-color: #000; }
+      </style>
+    </head>
+    <body>
+      <video id="video" playsinline autoplay crossorigin="anonymous"></video>
+      <script>
+        const video = document.getElementById('video');
+        let hls = null;
+
+        function postRN(data) {
+          if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+            window.ReactNativeWebView.postMessage(JSON.stringify(data));
+          }
+        }
+
+        function loadStream(url) {
+          if (hls) {
+            hls.destroy();
+            hls = null;
+          }
+
+          if (Hls.isSupported()) {
+            hls = new Hls({
+              debug: false,
+              enableWorker: true,
+              lowLatencyMode: true,
+              subtitleDisplay: true,
+            });
+
+            hls.loadSource(url);
+            hls.attachMedia(video);
+
+            hls.on(Hls.Events.MANIFEST_PARSED, function() {
+              video.play().catch(() => {});
+              postRN({ type: 'STATUS', status: 'readyToPlay' });
+            });
+
+            hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, function(event, data) {
+              const tracks = data.audioTracks.map((t, i) => ({
+                id: i,
+                label: t.name || t.lang || ('Audio ' + (i + 1)),
+                lang: t.lang
+              }));
+              postRN({ type: 'AUDIO_TRACKS', tracks: tracks, current: hls.audioTrack });
+            });
+
+            hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, function(event, data) {
+              postRN({ type: 'AUDIO_SWITCHED', id: data.id });
+            });
+
+            hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, function(event, data) {
+              const tracks = data.subtitleTracks.map((t, i) => ({
+                id: i,
+                label: t.name || t.lang || ('Sottotitolo ' + (i + 1)),
+                lang: t.lang
+              }));
+              postRN({ type: 'SUBTITLE_TRACKS', tracks: tracks, current: hls.subtitleTrack });
+            });
+
+            hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, function(event, data) {
+              postRN({ type: 'SUBTITLE_SWITCHED', id: data.id });
+            });
+
+            hls.on(Hls.Events.ERROR, function(event, data) {
+              if (data.fatal) {
+                if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                  hls.startLoad();
+                } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                  hls.recoverMediaError();
+                } else {
+                  postRN({ type: 'STATUS', status: 'error' });
+                }
+              }
+            });
+
+          } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            video.src = url;
+            video.addEventListener('loadedmetadata', function() {
+              video.play();
+              postRN({ type: 'STATUS', status: 'readyToPlay' });
+            });
+          }
+        }
+
+        video.addEventListener('timeupdate', function() {
+          postRN({
+            type: 'TIME_UPDATE',
+            currentTime: video.currentTime,
+            duration: video.duration || 0,
+            paused: video.paused
+          });
+        });
+
+        video.addEventListener('playing', function() {
+          postRN({ type: 'PLAYING_CHANGE', isPlaying: true });
+        });
+
+        video.addEventListener('pause', function() {
+          postRN({ type: 'PLAYING_CHANGE', isPlaying: false });
+        });
+
+        video.addEventListener('waiting', function() {
+          postRN({ type: 'STATUS', status: 'loading' });
+        });
+
+        // Funzioni globali richiamabili da React Native
+        window.togglePlay = function() {
+          if (video.paused) video.play();
+          else video.pause();
+        };
+
+        window.seekBy = function(seconds) {
+          video.currentTime = Math.max(0, video.currentTime + seconds);
+        };
+
+        window.setAudioTrack = function(index) {
+          if (hls) hls.audioTrack = parseInt(index, 10);
+        };
+
+        window.setSubtitleTrack = function(index) {
+          if (hls) hls.subtitleTrack = parseInt(index, 10);
+        };
+
+        // Caricamento iniziale
+        loadStream("${playlistUrl}");
+      </script>
+    </body>
+    </html>
+  `;
+
+  // -------------------------------------------------------------------------
+  // 7. Render UI
   // -------------------------------------------------------------------------
   return (
     <View style={styles.container}>
       <Stack.Screen options={{ headerShown: false }} />
 
-      <VideoView
-        player={player}
+      {/* Motore Video HTML5 hls.js tramite WebView */}
+      <WebView
+        ref={webviewRef}
+        originWhitelist={['*']}
+        source={{ html: htmlContent, baseUrl: BASE_URL }}
         style={styles.video}
-        contentFit="contain"
-        nativeControls={false}
-        allowsFullscreen={false}
+        allowsInlineMediaPlayback={true}
+        mediaPlaybackRequiresUserAction={false}
+        javaScriptEnabled={true}
+        domStorageEnabled={true}
+        mixedContentMode="always"
+        onMessage={(e) => handleWebViewMessage(e.nativeEvent.data)}
       />
 
-      {/* Overlay invisibile per intercettare il TAP a schermo quando i controlli sono nascosti */}
+      {/* Overlay per intercettare il Tap se i comandi sono nascosti */}
       {!showControls && (
         <Pressable
           style={StyleSheet.absoluteFillObject}
@@ -325,7 +455,7 @@ export default function PlayerScreen() {
         />
       )}
 
-      {/* Feedback temporaneo avanzamento/riavvolgimento (+10s / -10s) */}
+      {/* Feedback temporaneo avanzamento (+10s / -10s) */}
       {seekFeedbackText && (
         <View style={styles.seekFeedbackOverlay} pointerEvents="none">
           <Text style={styles.seekFeedbackText}>{seekFeedbackText}</Text>
@@ -399,10 +529,7 @@ export default function PlayerScreen() {
               {/* Menu Audio & Sottotitoli */}
               <Pressable
                 focusable={true}
-                onPress={() => {
-                  syncTracks();
-                  setShowTracksModal(true);
-                }}
+                onPress={() => setShowTracksModal(true)}
                 style={({ focused }) => [styles.iconBtn, focused && styles.btnFocused]}
               >
                 <Ionicons name="options-outline" size={26} color="#fff" />
@@ -439,18 +566,13 @@ export default function PlayerScreen() {
                 {audioTracks.length === 0 ? (
                   <Text style={styles.emptyTrackText}>Traccia audio predefinita</Text>
                 ) : (
-                  audioTracks.map((track, idx) => {
-                    const isSelected =
-                      selectedAudio &&
-                      (selectedAudio.id === track.id || selectedAudio === track);
+                  audioTracks.map((track) => {
+                    const isSelected = selectedAudioId === track.id;
                     return (
                       <Pressable
-                        key={track.id || idx}
+                        key={track.id}
                         focusable={true}
-                        onPress={() => {
-                          player.audioTrack = track;
-                          setSelectedAudio(track);
-                        }}
+                        onPress={() => selectAudioTrack(track.id)}
                         style={({ focused }) => [
                           styles.trackOption,
                           isSelected && styles.trackOptionSelected,
@@ -458,7 +580,7 @@ export default function PlayerScreen() {
                         ]}
                       >
                         <Text style={[styles.trackText, isSelected && styles.trackTextSelected]}>
-                          {getAudioTrackLabel(track, idx)}
+                          {track.label}
                         </Text>
                         {isSelected && <Ionicons name="checkmark" size={18} color="#e8ff47" />}
                       </Pressable>
@@ -472,34 +594,33 @@ export default function PlayerScreen() {
                 <Text style={styles.columnHeader}>SOTTOTITOLI</Text>
                 <Pressable
                   focusable={true}
-                  onPress={() => {
-                    player.subtitleTrack = null;
-                    setSelectedSub(null);
-                  }}
+                  onPress={() => selectSubtitleTrack(-1)}
                   style={({ focused }) => [
                     styles.trackOption,
-                    selectedSub === null && styles.trackOptionSelected,
+                    (selectedSubId === -1 || selectedSubId === null) && styles.trackOptionSelected,
                     focused && styles.btnFocused,
                   ]}
                 >
-                  <Text style={[styles.trackText, selectedSub === null && styles.trackTextSelected]}>
+                  <Text
+                    style={[
+                      styles.trackText,
+                      (selectedSubId === -1 || selectedSubId === null) && styles.trackTextSelected,
+                    ]}
+                  >
                     Disattivati
                   </Text>
-                  {selectedSub === null && <Ionicons name="checkmark" size={18} color="#e8ff47" />}
+                  {(selectedSubId === -1 || selectedSubId === null) && (
+                    <Ionicons name="checkmark" size={18} color="#e8ff47" />
+                  )}
                 </Pressable>
 
-                {subTracks.map((track, idx) => {
-                  const isSelected =
-                    selectedSub &&
-                    (selectedSub.id === track.id || selectedSub === track);
+                {subTracks.map((track) => {
+                  const isSelected = selectedSubId === track.id;
                   return (
                     <Pressable
-                      key={track.id || idx}
+                      key={track.id}
                       focusable={true}
-                      onPress={() => {
-                        player.subtitleTrack = track;
-                        setSelectedSub(track);
-                      }}
+                      onPress={() => selectSubtitleTrack(track.id)}
                       style={({ focused }) => [
                         styles.trackOption,
                         isSelected && styles.trackOptionSelected,
@@ -507,7 +628,7 @@ export default function PlayerScreen() {
                       ]}
                     >
                       <Text style={[styles.trackText, isSelected && styles.trackTextSelected]}>
-                        {getSubTrackLabel(track, idx)}
+                        {track.label}
                       </Text>
                       {isSelected && <Ionicons name="checkmark" size={18} color="#e8ff47" />}
                     </Pressable>
