@@ -14,7 +14,6 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TouchableWithoutFeedback,
   View,
 } from 'react-native';
 
@@ -25,9 +24,9 @@ const BASE_URL = 'http://129.153.47.200:8081';
 const { width } = Dimensions.get('window');
 const isTV = Platform.isTV || width >= 1280;
 
-const WATCHDOG_INTERVAL_MS = 1000;  // Controlla lo stato ogni secondo
-const STALL_THRESHOLD_MS   = 12000; // 12s prima di ripristinare
-const RELOAD_COOLDOWN_MS   = 20000; // Cooldown reload
+const WATCHDOG_INTERVAL_MS = 1000;
+const STALL_THRESHOLD_MS   = 12000;
+const RELOAD_COOLDOWN_MS   = 20000;
 const RETRY_DELAYS         = [5000, 10000, 20000, 30000];
 const CONTROLS_HIDE_DELAY  = 4000;
 
@@ -54,7 +53,7 @@ export default function PlayerScreen() {
   const [subTracks, setSubTracks]             = useState<any[]>([]);
   const [selectedSub, setSelectedSub]         = useState<any>(null);
 
-  // Overlay feedback Seek (+10s / -10s)
+  // Feedback Seek (+10s / -10s)
   const [seekFeedbackText, setSeekFeedbackText] = useState<string | null>(null);
 
   // Ref per logica persistente
@@ -82,7 +81,7 @@ export default function PlayerScreen() {
   });
 
   // -------------------------------------------------------------------------
-  // 2. Orientamento e Tasto Back Hardware (TV / Mobile)
+  // 2. Orientamento e Tasto Back Hardware
   // -------------------------------------------------------------------------
   useEffect(() => {
     if (!isTV) ScreenOrientation.unlockAsync();
@@ -104,24 +103,43 @@ export default function PlayerScreen() {
   }, [showTracksModal]);
 
   // -------------------------------------------------------------------------
-  // 3. Listener di Stato Player & Tracce Audio/Sottotitoli
+  // 3. Sincronizzazione Tracce Audio e Sottotitoli
   // -------------------------------------------------------------------------
   const syncTracks = useCallback(() => {
     if (!player) return;
+    try {
+      const audios = player.availableAudioTracks || [];
+      const subs = player.availableSubtitleTracks || [];
 
-    // Tracce Audio
-    if (player.availableAudioTracks) {
-      setAudioTracks(player.availableAudioTracks);
-      setSelectedAudio(player.audioTrack);
-    }
+      setAudioTracks(audios);
+      setSubTracks(subs);
 
-    // Tracce Sottotitoli
-    if (player.availableSubtitleTracks) {
-      setSubTracks(player.availableSubtitleTracks);
-      setSelectedSub(player.subtitleTrack);
+      if (player.audioTrack) {
+        setSelectedAudio(player.audioTrack);
+      } else if (audios.length > 0) {
+        setSelectedAudio(audios[0]);
+      }
+
+      setSelectedSub(player.subtitleTrack || null);
+    } catch (e) {
+      console.log('Errore sync tracce:', e);
     }
   }, [player]);
 
+  // Nomi per le tracce con fallback
+  const getAudioTrackLabel = (track: any, index: number) => {
+    if (!track) return `Audio ${index + 1}`;
+    return track.label || track.language || track.id || `Audio ${index + 1}`;
+  };
+
+  const getSubTrackLabel = (track: any, index: number) => {
+    if (!track) return `Sottotitolo ${index + 1}`;
+    return track.label || track.language || track.id || `Sottotitolo ${index + 1}`;
+  };
+
+  // -------------------------------------------------------------------------
+  // 4. Listener di Stato Player
+  // -------------------------------------------------------------------------
   useEffect(() => {
     const statusSub = player.addListener('statusChange', (status) => {
       if (status.status === 'readyToPlay') {
@@ -129,6 +147,7 @@ export default function PlayerScreen() {
         errorRef.current = false;
         setBuffering(false);
         setError(false);
+        setIsPlaying(player.playing);
         lastProgressRef.current = Date.now();
         retryCountRef.current = 0;
         syncTracks();
@@ -148,6 +167,8 @@ export default function PlayerScreen() {
     const timeSub = player.addListener('timeUpdate', (event) => {
       setCurrentTime(event.currentTime);
       if (player.duration) setDuration(player.duration);
+      // Aggiorna le tracce se non ancora rilevate
+      if (audioTracks.length === 0) syncTracks();
     });
 
     const playingSub = player.addListener('playingChange', (event) => {
@@ -159,10 +180,10 @@ export default function PlayerScreen() {
       timeSub.remove();
       playingSub.remove();
     };
-  }, [player, syncTracks]);
+  }, [player, syncTracks, audioTracks.length]);
 
   // -------------------------------------------------------------------------
-  // 4. Logica di Reload & Retry (Watchdog)
+  // 5. Watchdog e Auto-Retry
   // -------------------------------------------------------------------------
   const forceReload = () => {
     errorRef.current = false;
@@ -192,7 +213,7 @@ export default function PlayerScreen() {
 
   useEffect(() => {
     watchdogRef.current = setInterval(() => {
-      if (!player || errorRef.current || player.paused) return;
+      if (!player || errorRef.current || !player.playing) return;
 
       const cTime = player.currentTime;
       const now = Date.now();
@@ -224,7 +245,7 @@ export default function PlayerScreen() {
   }, [player]);
 
   // -------------------------------------------------------------------------
-  // 5. Gestione Controlli & Pressione Prolungata Seek (+10s / -10s)
+  // 6. Gestione Controlli Visivi e Seek
   // -------------------------------------------------------------------------
   const showControlsTemporarily = () => {
     setShowControls(true);
@@ -238,8 +259,10 @@ export default function PlayerScreen() {
     showControlsTemporarily();
     if (player.playing) {
       player.pause();
+      setIsPlaying(false);
     } else {
       player.play();
+      setIsPlaying(true);
     }
   };
 
@@ -248,7 +271,6 @@ export default function PlayerScreen() {
     const target = Math.max(0, player.currentTime + seconds);
     player.currentTime = target;
 
-    // Feedback visuale al centro dello schermo (+10s / -10s)
     const sign = seconds > 0 ? '+' : '';
     setSeekFeedbackText(`${sign}${seconds}s`);
     if (seekTimerRef.current) clearTimeout(seekTimerRef.current);
@@ -257,14 +279,13 @@ export default function PlayerScreen() {
     showControlsTemporarily();
   };
 
-  // Avvio avanzamento/riavvolgimento continuo se si tiene premuto (TV & Mobile)
   const startSeeking = (seconds: number) => {
     seekBy(seconds);
     holdTimerRef.current = setTimeout(() => {
       seekIntervalRef.current = setInterval(() => {
         seekBy(seconds);
-      }, 250); // Incremento ogni 250ms durante il mantenimento
-    }, 400); // Soglia per rilevare la pressione prolungata
+      }, 250);
+    }, 400);
   };
 
   const stopSeeking = () => {
@@ -281,192 +302,154 @@ export default function PlayerScreen() {
   };
 
   // -------------------------------------------------------------------------
-  // 6. UI Render
+  // 7. Render Interfaccia
   // -------------------------------------------------------------------------
   return (
-    <TouchableWithoutFeedback onPress={showControlsTemporarily}>
-      <View style={styles.container}>
-        <Stack.Screen options={{ headerShown: false }} />
+    <View style={styles.container}>
+      <Stack.Screen options={{ headerShown: false }} />
 
-        <VideoView
-          player={player}
-          style={styles.video}
-          contentFit="contain"
-          nativeControls={false}
-          allowsFullscreen={false}
+      <VideoView
+        player={player}
+        style={styles.video}
+        contentFit="contain"
+        nativeControls={false}
+        allowsFullscreen={false}
+      />
+
+      {/* Overlay invisibile per intercettare il TAP a schermo quando i controlli sono nascosti */}
+      {!showControls && (
+        <Pressable
+          style={StyleSheet.absoluteFillObject}
+          onPress={showControlsTemporarily}
+          focusable={true}
         />
+      )}
 
-        {/* Feedback visuale temporaneo (+10s / -10s) */}
-        {seekFeedbackText && (
-          <View style={styles.seekFeedbackOverlay}>
-            <Text style={styles.seekFeedbackText}>{seekFeedbackText}</Text>
+      {/* Feedback temporaneo avanzamento/riavvolgimento (+10s / -10s) */}
+      {seekFeedbackText && (
+        <View style={styles.seekFeedbackOverlay} pointerEvents="none">
+          <Text style={styles.seekFeedbackText}>{seekFeedbackText}</Text>
+        </View>
+      )}
+
+      {/* Overlay Controlli Stile Netflix */}
+      {showControls && (
+        <Pressable style={styles.controlsContainer} onPress={showControlsTemporarily}>
+          {/* Top Bar */}
+          <View style={styles.topBar}>
+            <Pressable
+              focusable={true}
+              onPress={() => router.back()}
+              style={({ focused }) => [styles.iconBtn, focused && styles.btnFocused]}
+            >
+              <Ionicons name="arrow-back" size={24} color="#fff" />
+            </Pressable>
+            <Text style={styles.channelTitle}>CANALE {id}</Text>
           </View>
-        )}
 
-        {/* Overlay Controlli Stile Netflix */}
-        {showControls && (
-          <View style={styles.controlsContainer}>
-            {/* Top Bar */}
-            <View style={styles.topBar}>
-              <Pressable
-                focusable={true}
-                onPress={() => router.back()}
-                style={({ focused }) => [styles.iconBtn, focused && styles.btnFocused]}
-              >
-                <Ionicons name="arrow-back" size={24} color="#fff" />
-              </Pressable>
-              <Text style={styles.channelTitle}>CANALE {id}</Text>
+          {/* Bottom Bar Controls */}
+          <View style={styles.bottomBar}>
+            {/* Timeline Progress */}
+            <View style={styles.timelineRow}>
+              <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
+              <View style={styles.progressBarBackground}>
+                <View
+                  style={[
+                    styles.progressBarFill,
+                    { width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` },
+                  ]}
+                />
+              </View>
+              <Text style={styles.timeText}>{formatTime(duration)}</Text>
             </View>
 
-            {/* Bottom Bar Controls */}
-            <View style={styles.bottomBar}>
-              {/* Timeline Progress */}
-              <View style={styles.timelineRow}>
-                <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
-                <View style={styles.progressBarBackground}>
-                  <View
-                    style={[
-                      styles.progressBarFill,
-                      { width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` },
-                    ]}
-                  />
-                </View>
-                <Text style={styles.timeText}>{formatTime(duration)}</Text>
-              </View>
-
-              {/* Action Buttons */}
-              <View style={styles.buttonsRow}>
-                <View style={styles.leftButtons}>
-                  {/* Rewind -10s */}
-                  <Pressable
-                    focusable={true}
-                    onPressIn={() => startSeeking(-10)}
-                    onPressOut={stopSeeking}
-                    style={({ focused }) => [styles.iconBtn, focused && styles.btnFocused]}
-                  >
-                    <Ionicons name="play-back" size={26} color="#fff" />
-                  </Pressable>
-
-                  {/* Play / Pause */}
-                  <Pressable
-                    focusable={true}
-                    onPress={togglePlay}
-                    style={({ focused }) => [styles.iconBtn, styles.playBtn, focused && styles.btnFocused]}
-                  >
-                    <Ionicons name={isPlaying ? 'pause' : 'play'} size={32} color="#000" />
-                  </Pressable>
-
-                  {/* Forward +10s */}
-                  <Pressable
-                    focusable={true}
-                    onPressIn={() => startSeeking(10)}
-                    onPressOut={stopSeeking}
-                    style={({ focused }) => [styles.iconBtn, focused && styles.btnFocused]}
-                  >
-                    <Ionicons name="play-forward" size={26} color="#fff" />
-                  </Pressable>
-                </View>
-
-                {/* Right Controls: Audio & Subtitles Menu */}
+            {/* Action Buttons */}
+            <View style={styles.buttonsRow}>
+              <View style={styles.leftButtons}>
+                {/* Indietro -10s */}
                 <Pressable
                   focusable={true}
-                  onPress={() => {
-                    syncTracks();
-                    setShowTracksModal(true);
-                  }}
+                  onPressIn={() => startSeeking(-10)}
+                  onPressOut={stopSeeking}
                   style={({ focused }) => [styles.iconBtn, focused && styles.btnFocused]}
                 >
-                  <Ionicons name="options-outline" size={26} color="#fff" />
+                  <Ionicons name="play-back" size={26} color="#fff" />
                 </Pressable>
-              </View>
-            </View>
-          </View>
-        )}
 
-        {/* Modal Selezione Audio & Sottotitoli (Stile Netflix) */}
-        <Modal
-          visible={showTracksModal}
-          transparent={true}
-          animationType="fade"
-          onRequestClose={() => setShowTracksModal(false)}
-        >
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalContent}>
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Audio e Sottotitoli</Text>
+                {/* Play / Pausa */}
                 <Pressable
                   focusable={true}
-                  onPress={() => setShowTracksModal(false)}
-                  style={({ focused }) => [styles.closeBtn, focused && styles.btnFocused]}
+                  onPress={togglePlay}
+                  style={({ focused }) => [styles.iconBtn, styles.playBtn, focused && styles.btnFocused]}
                 >
-                  <Ionicons name="close" size={24} color="#fff" />
+                  <Ionicons name={isPlaying ? 'pause' : 'play'} size={32} color="#000" />
+                </Pressable>
+
+                {/* Avanti +10s */}
+                <Pressable
+                  focusable={true}
+                  onPressIn={() => startSeeking(10)}
+                  onPressOut={stopSeeking}
+                  style={({ focused }) => [styles.iconBtn, focused && styles.btnFocused]}
+                >
+                  <Ionicons name="play-forward" size={26} color="#fff" />
                 </Pressable>
               </View>
 
-              <ScrollView contentContainerStyle={styles.columnsContainer}>
-                {/* Colonna Audio */}
-                <View style={styles.column}>
-                  <Text style={styles.columnHeader}>AUDIO</Text>
-                  {audioTracks.length === 0 ? (
-                    <Text style={styles.emptyTrackText}>Nessuna traccia audio disponibile</Text>
-                  ) : (
-                    audioTracks.map((track, idx) => {
-                      const isSelected = selectedAudio?.id === track.id || selectedAudio === track;
-                      return (
-                        <Pressable
-                          key={track.id || idx}
-                          focusable={true}
-                          onPress={() => {
-                            player.audioTrack = track;
-                            setSelectedAudio(track);
-                          }}
-                          style={({ focused }) => [
-                            styles.trackOption,
-                            isSelected && styles.trackOptionSelected,
-                            focused && styles.btnFocused,
-                          ]}
-                        >
-                          <Text style={[styles.trackText, isSelected && styles.trackTextSelected]}>
-                            {track.language || track.label || `Audio ${idx + 1}`}
-                          </Text>
-                          {isSelected && <Ionicons name="checkmark" size={18} color="#e8ff47" />}
-                        </Pressable>
-                      );
-                    })
-                  )}
-                </View>
+              {/* Menu Audio & Sottotitoli */}
+              <Pressable
+                focusable={true}
+                onPress={() => {
+                  syncTracks();
+                  setShowTracksModal(true);
+                }}
+                style={({ focused }) => [styles.iconBtn, focused && styles.btnFocused]}
+              >
+                <Ionicons name="options-outline" size={26} color="#fff" />
+              </Pressable>
+            </View>
+          </View>
+        </Pressable>
+      )}
 
-                {/* Colonna Sottotitoli */}
-                <View style={styles.column}>
-                  <Text style={styles.columnHeader}>SOTTOTITOLI</Text>
-                  {/* Opzione Disattivato */}
-                  <Pressable
-                    focusable={true}
-                    onPress={() => {
-                      player.subtitleTrack = null;
-                      setSelectedSub(null);
-                    }}
-                    style={({ focused }) => [
-                      styles.trackOption,
-                      selectedSub === null && styles.trackOptionSelected,
-                      focused && styles.btnFocused,
-                    ]}
-                  >
-                    <Text style={[styles.trackText, selectedSub === null && styles.trackTextSelected]}>
-                      Disattivati
-                    </Text>
-                    {selectedSub === null && <Ionicons name="checkmark" size={18} color="#e8ff47" />}
-                  </Pressable>
+      {/* Modal Selezione Audio & Sottotitoli */}
+      <Modal
+        visible={showTracksModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowTracksModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Audio e Sottotitoli</Text>
+              <Pressable
+                focusable={true}
+                onPress={() => setShowTracksModal(false)}
+                style={({ focused }) => [styles.closeBtn, focused && styles.btnFocused]}
+              >
+                <Ionicons name="close" size={24} color="#fff" />
+              </Pressable>
+            </View>
 
-                  {subTracks.map((track, idx) => {
-                    const isSelected = selectedSub?.id === track.id || selectedSub === track;
+            <ScrollView contentContainerStyle={styles.columnsContainer}>
+              {/* Colonna Audio */}
+              <View style={styles.column}>
+                <Text style={styles.columnHeader}>AUDIO</Text>
+                {audioTracks.length === 0 ? (
+                  <Text style={styles.emptyTrackText}>Traccia audio predefinita</Text>
+                ) : (
+                  audioTracks.map((track, idx) => {
+                    const isSelected =
+                      selectedAudio &&
+                      (selectedAudio.id === track.id || selectedAudio === track);
                     return (
                       <Pressable
                         key={track.id || idx}
                         focusable={true}
                         onPress={() => {
-                          player.subtitleTrack = track;
-                          setSelectedSub(track);
+                          player.audioTrack = track;
+                          setSelectedAudio(track);
                         }}
                         style={({ focused }) => [
                           styles.trackOption,
@@ -475,37 +458,85 @@ export default function PlayerScreen() {
                         ]}
                       >
                         <Text style={[styles.trackText, isSelected && styles.trackTextSelected]}>
-                          {track.language || track.label || `Sottotitolo ${idx + 1}`}
+                          {getAudioTrackLabel(track, idx)}
                         </Text>
                         {isSelected && <Ionicons name="checkmark" size={18} color="#e8ff47" />}
                       </Pressable>
                     );
-                  })}
-                </View>
-              </ScrollView>
-            </View>
-          </View>
-        </Modal>
+                  })
+                )}
+              </View>
 
-        {/* Overlay Caricamento / Watchdog */}
-        {buffering && !error && (
-          <View style={styles.overlay}>
-            <ActivityIndicator color="#e8ff47" size="large" />
-            <Text style={styles.overlayText}>ripristino segnale…</Text>
-          </View>
-        )}
+              {/* Colonna Sottotitoli */}
+              <View style={styles.column}>
+                <Text style={styles.columnHeader}>SOTTOTITOLI</Text>
+                <Pressable
+                  focusable={true}
+                  onPress={() => {
+                    player.subtitleTrack = null;
+                    setSelectedSub(null);
+                  }}
+                  style={({ focused }) => [
+                    styles.trackOption,
+                    selectedSub === null && styles.trackOptionSelected,
+                    focused && styles.btnFocused,
+                  ]}
+                >
+                  <Text style={[styles.trackText, selectedSub === null && styles.trackTextSelected]}>
+                    Disattivati
+                  </Text>
+                  {selectedSub === null && <Ionicons name="checkmark" size={18} color="#e8ff47" />}
+                </Pressable>
 
-        {/* Overlay Errore Fatale */}
-        {error && (
-          <View style={styles.overlay}>
-            <Text style={styles.overlayTextError}>✕</Text>
-            <Text style={styles.overlayText}>
-              segnale assente — ricollegamento {retryCount}…
-            </Text>
+                {subTracks.map((track, idx) => {
+                  const isSelected =
+                    selectedSub &&
+                    (selectedSub.id === track.id || selectedSub === track);
+                  return (
+                    <Pressable
+                      key={track.id || idx}
+                      focusable={true}
+                      onPress={() => {
+                        player.subtitleTrack = track;
+                        setSelectedSub(track);
+                      }}
+                      style={({ focused }) => [
+                        styles.trackOption,
+                        isSelected && styles.trackOptionSelected,
+                        focused && styles.btnFocused,
+                      ]}
+                    >
+                      <Text style={[styles.trackText, isSelected && styles.trackTextSelected]}>
+                        {getSubTrackLabel(track, idx)}
+                      </Text>
+                      {isSelected && <Ionicons name="checkmark" size={18} color="#e8ff47" />}
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </ScrollView>
           </View>
-        )}
-      </View>
-    </TouchableWithoutFeedback>
+        </View>
+      </Modal>
+
+      {/* Overlay Caricamento / Watchdog */}
+      {buffering && !error && (
+        <View style={styles.overlay} pointerEvents="none">
+          <ActivityIndicator color="#e8ff47" size="large" />
+          <Text style={styles.overlayText}>ripristino segnale…</Text>
+        </View>
+      )}
+
+      {/* Overlay Errore Fatale */}
+      {error && (
+        <View style={styles.overlay} pointerEvents="none">
+          <Text style={styles.overlayTextError}>✕</Text>
+          <Text style={styles.overlayText}>
+            segnale assente — ricollegamento {retryCount}…
+          </Text>
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -517,7 +548,7 @@ const styles = StyleSheet.create({
   controlsContainer: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.5)',
-    justify: 'space-between',
+    justifyContent: 'space-between',
     padding: 24,
     zIndex: 10,
   },
@@ -596,8 +627,8 @@ const styles = StyleSheet.create({
   seekFeedbackOverlay: {
     position: 'absolute',
     top: '45%',
-    left: '40%',
-    right: '40%',
+    left: '35%',
+    right: '35%',
     backgroundColor: 'rgba(0,0,0,0.85)',
     paddingVertical: 12,
     borderRadius: 24,
@@ -693,7 +724,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   emptyTrackText: {
-    color: '#444',
+    color: '#666',
     fontSize: 12,
     fontFamily: 'monospace',
   },
@@ -705,6 +736,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 12,
+    zIndex: 30,
   },
   overlayText: { color: '#888', fontFamily: 'monospace', fontSize: 13 },
   overlayTextError: { color: '#ff3b3b', fontSize: 32 },
