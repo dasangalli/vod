@@ -7,6 +7,7 @@ import {
   ActivityIndicator,
   BackHandler,
   Dimensions,
+  LayoutChangeEvent,
   Modal,
   Platform,
   Pressable,
@@ -44,8 +45,10 @@ export default function PlayerScreen() {
   const [retryCount, setRetryCount]       = useState(0);
   const [showControls, setShowControls]   = useState(true);
   const [isPlaying, setIsPlaying]         = useState(true);
+  const [isEnded, setIsEnded]             = useState(false);
   const [currentTime, setCurrentTime]     = useState(0);
   const [duration, setDuration]           = useState(0);
+  const [progressBarWidth, setProgressBarWidth] = useState(0);
 
   // Modal Audio & Sottotitoli
   const [showTracksModal, setShowTracksModal] = useState(false);
@@ -63,6 +66,7 @@ export default function PlayerScreen() {
   const lastReloadRef    = useRef<number>(0);
   const bufferingRef     = useRef<boolean>(true);
   const errorRef         = useRef<boolean>(false);
+  const isEndedRef       = useRef<boolean>(false);
   const retryCountRef    = useRef<number>(0);
 
   // Ref Timer
@@ -112,8 +116,10 @@ export default function PlayerScreen() {
             lastProgressRef.current = Date.now();
             retryCountRef.current = 0;
           } else if (msg.status === 'loading') {
-            bufferingRef.current = true;
-            setBuffering(true);
+            if (!isEndedRef.current) {
+              bufferingRef.current = true;
+              setBuffering(true);
+            }
           } else if (msg.status === 'error') {
             errorRef.current = true;
             setError(true);
@@ -126,10 +132,30 @@ export default function PlayerScreen() {
           setCurrentTime(msg.currentTime || 0);
           if (msg.duration) setDuration(msg.duration);
           setIsPlaying(!msg.paused);
+
+          if (!msg.paused && msg.currentTime > 0 && bufferingRef.current) {
+            bufferingRef.current = false;
+            setBuffering(false);
+          }
           break;
 
         case 'PLAYING_CHANGE':
           setIsPlaying(msg.isPlaying);
+          if (msg.isPlaying) {
+            bufferingRef.current = false;
+            setBuffering(false);
+            isEndedRef.current = false;
+            setIsEnded(false);
+          }
+          break;
+
+        case 'ENDED':
+          isEndedRef.current = true;
+          setIsEnded(true);
+          setIsPlaying(false);
+          bufferingRef.current = false;
+          setBuffering(false);
+          setShowControls(true);
           break;
 
         case 'AUDIO_TRACKS':
@@ -170,11 +196,18 @@ export default function PlayerScreen() {
   };
 
   const togglePlay = () => {
-    showControlsTemporarily();
+    resetControlsTimer();
+    if (isEnded) {
+      isEndedRef.current = false;
+      setIsEnded(false);
+      runJS(`window.seekTo(0)`);
+    }
     runJS('window.togglePlay()');
   };
 
   const seekBy = (seconds: number) => {
+    isEndedRef.current = false;
+    setIsEnded(false);
     runJS(`window.seekBy(${seconds})`);
 
     const sign = seconds > 0 ? '+' : '';
@@ -182,7 +215,21 @@ export default function PlayerScreen() {
     if (seekTimerRef.current) clearTimeout(seekTimerRef.current);
     seekTimerRef.current = setTimeout(() => setSeekFeedbackText(null), 800);
 
-    showControlsTemporarily();
+    resetControlsTimer();
+  };
+
+  // Tap diretto sulla barra di avanzamento
+  const handleTimelinePress = (event: any) => {
+    if (duration <= 0 || progressBarWidth <= 0) return;
+
+    const touchX = event.nativeEvent.locationX;
+    const ratio = Math.max(0, Math.min(1, touchX / progressBarWidth));
+    const targetTime = ratio * duration;
+
+    isEndedRef.current = false;
+    setIsEnded(false);
+    runJS(`window.seekTo(${targetTime})`);
+    resetControlsTimer();
   };
 
   const selectAudioTrack = (index: number) => {
@@ -196,11 +243,36 @@ export default function PlayerScreen() {
   };
 
   // -------------------------------------------------------------------------
-  // 4. Watchdog e Auto-Retry
+  // 4. Gestione Visibilità Controlli (Toggle & Auto-Hide)
+  // -------------------------------------------------------------------------
+  const toggleControls = () => {
+    if (showControls) {
+      if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
+      setShowControls(false);
+    } else {
+      setShowControls(true);
+      resetControlsTimer();
+    }
+  };
+
+  const resetControlsTimer = () => {
+    setShowControls(true);
+    if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
+    controlsTimerRef.current = setTimeout(() => {
+      if (!showTracksModal && !isEndedRef.current) {
+        setShowControls(false);
+      }
+    }, CONTROLS_HIDE_DELAY);
+  };
+
+  // -------------------------------------------------------------------------
+  // 5. Watchdog e Auto-Retry
   // -------------------------------------------------------------------------
   const forceReload = () => {
     errorRef.current = false;
     bufferingRef.current = true;
+    isEndedRef.current = false;
+    setIsEnded(false);
     setError(false);
     setBuffering(true);
     lastProgressRef.current = Date.now();
@@ -220,7 +292,8 @@ export default function PlayerScreen() {
 
   useEffect(() => {
     watchdogRef.current = setInterval(() => {
-      if (errorRef.current || !isPlaying) return;
+      if (errorRef.current || !isPlaying || isEndedRef.current) return;
+      if (duration > 0 && currentTime >= duration - 1.5) return;
 
       const now = Date.now();
       if (currentTime !== lastTimeRef.current) {
@@ -247,19 +320,11 @@ export default function PlayerScreen() {
       if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
       stopSeeking();
     };
-  }, [currentTime, isPlaying]);
+  }, [currentTime, isPlaying, duration]);
 
   // -------------------------------------------------------------------------
-  // 5. Gestione Pressione Prolungata e Controlli
+  // 6. Gestione Pressione Prolungata Avanzamento
   // -------------------------------------------------------------------------
-  const showControlsTemporarily = () => {
-    setShowControls(true);
-    if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
-    controlsTimerRef.current = setTimeout(() => {
-      if (!showTracksModal) setShowControls(false);
-    }, CONTROLS_HIDE_DELAY);
-  };
-
   const startSeeking = (seconds: number) => {
     seekBy(seconds);
     holdTimerRef.current = setTimeout(() => {
@@ -283,7 +348,7 @@ export default function PlayerScreen() {
   };
 
   // -------------------------------------------------------------------------
-  // 6. Codice HTML5 + hls.js iniettato nella WebView
+  // 7. Codice HTML5 + hls.js iniettato nella WebView
   // -------------------------------------------------------------------------
   const htmlContent = `
     <!DOCTYPE html>
@@ -389,6 +454,7 @@ export default function PlayerScreen() {
         });
 
         video.addEventListener('playing', function() {
+          postRN({ type: 'STATUS', status: 'readyToPlay' });
           postRN({ type: 'PLAYING_CHANGE', isPlaying: true });
         });
 
@@ -400,7 +466,10 @@ export default function PlayerScreen() {
           postRN({ type: 'STATUS', status: 'loading' });
         });
 
-        // Funzioni globali richiamabili da React Native
+        video.addEventListener('ended', function() {
+          postRN({ type: 'ENDED' });
+        });
+
         window.togglePlay = function() {
           if (video.paused) video.play();
           else video.pause();
@@ -408,6 +477,10 @@ export default function PlayerScreen() {
 
         window.seekBy = function(seconds) {
           video.currentTime = Math.max(0, video.currentTime + seconds);
+        };
+
+        window.seekTo = function(seconds) {
+          video.currentTime = seconds;
         };
 
         window.setAudioTrack = function(index) {
@@ -418,7 +491,6 @@ export default function PlayerScreen() {
           if (hls) hls.subtitleTrack = parseInt(index, 10);
         };
 
-        // Caricamento iniziale
         loadStream("${playlistUrl}");
       </script>
     </body>
@@ -426,7 +498,7 @@ export default function PlayerScreen() {
   `;
 
   // -------------------------------------------------------------------------
-  // 7. Render UI
+  // 8. Render UI
   // -------------------------------------------------------------------------
   return (
     <View style={styles.container}>
@@ -446,11 +518,11 @@ export default function PlayerScreen() {
         onMessage={(e) => handleWebViewMessage(e.nativeEvent.data)}
       />
 
-      {/* Overlay per intercettare il Tap se i comandi sono nascosti */}
+      {/* Overlay invisibile per mostrare i controlli quando sono nascosti */}
       {!showControls && (
         <Pressable
           style={StyleSheet.absoluteFillObject}
-          onPress={showControlsTemporarily}
+          onPress={toggleControls}
           focusable={true}
         />
       )}
@@ -464,12 +536,15 @@ export default function PlayerScreen() {
 
       {/* Overlay Controlli Stile Netflix */}
       {showControls && (
-        <Pressable style={styles.controlsContainer} onPress={showControlsTemporarily}>
+        <Pressable style={styles.controlsContainer} onPress={toggleControls}>
           {/* Top Bar */}
           <View style={styles.topBar}>
             <Pressable
               focusable={true}
-              onPress={() => router.back()}
+              onPress={(e) => {
+                e.stopPropagation();
+                router.back();
+              }}
               style={({ focused }) => [styles.iconBtn, focused && styles.btnFocused]}
             >
               <Ionicons name="arrow-back" size={24} color="#fff" />
@@ -479,17 +554,37 @@ export default function PlayerScreen() {
 
           {/* Bottom Bar Controls */}
           <View style={styles.bottomBar}>
-            {/* Timeline Progress */}
+            {/* Timeline Progress Interattiva */}
             <View style={styles.timelineRow}>
               <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
-              <View style={styles.progressBarBackground}>
-                <View
-                  style={[
-                    styles.progressBarFill,
-                    { width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` },
-                  ]}
-                />
-              </View>
+              
+              <Pressable
+                style={styles.progressBarTouchArea}
+                onPress={(e) => {
+                  e.stopPropagation();
+                  handleTimelinePress(e);
+                }}
+                onLayout={(e: LayoutChangeEvent) => setProgressBarWidth(e.nativeEvent.layout.width)}
+              >
+                <View style={styles.progressBarBackground}>
+                  <View
+                    style={[
+                      styles.progressBarFill,
+                      { width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` },
+                    ]}
+                  />
+                  {/* Pallino indicatore della posizione attuale */}
+                  {duration > 0 && (
+                    <View
+                      style={[
+                        styles.progressThumb,
+                        { left: `${(currentTime / duration) * 100}%` },
+                      ]}
+                    />
+                  )}
+                </View>
+              </Pressable>
+
               <Text style={styles.timeText}>{formatTime(duration)}</Text>
             </View>
 
@@ -499,26 +594,39 @@ export default function PlayerScreen() {
                 {/* Indietro -10s */}
                 <Pressable
                   focusable={true}
-                  onPressIn={() => startSeeking(-10)}
+                  onPressIn={(e) => {
+                    e.stopPropagation();
+                    startSeeking(-10);
+                  }}
                   onPressOut={stopSeeking}
                   style={({ focused }) => [styles.iconBtn, focused && styles.btnFocused]}
                 >
                   <Ionicons name="play-back" size={26} color="#fff" />
                 </Pressable>
 
-                {/* Play / Pausa */}
+                {/* Play / Pausa / Replay */}
                 <Pressable
                   focusable={true}
-                  onPress={togglePlay}
+                  onPress={(e) => {
+                    e.stopPropagation();
+                    togglePlay();
+                  }}
                   style={({ focused }) => [styles.iconBtn, styles.playBtn, focused && styles.btnFocused]}
                 >
-                  <Ionicons name={isPlaying ? 'pause' : 'play'} size={32} color="#000" />
+                  <Ionicons
+                    name={isEnded ? 'refresh' : isPlaying ? 'pause' : 'play'}
+                    size={32}
+                    color="#000"
+                  />
                 </Pressable>
 
                 {/* Avanti +10s */}
                 <Pressable
                   focusable={true}
-                  onPressIn={() => startSeeking(10)}
+                  onPressIn={(e) => {
+                    e.stopPropagation();
+                    startSeeking(10);
+                  }}
                   onPressOut={stopSeeking}
                   style={({ focused }) => [styles.iconBtn, focused && styles.btnFocused]}
                 >
@@ -529,7 +637,10 @@ export default function PlayerScreen() {
               {/* Menu Audio & Sottotitoli */}
               <Pressable
                 focusable={true}
-                onPress={() => setShowTracksModal(true)}
+                onPress={(e) => {
+                  e.stopPropagation();
+                  setShowTracksModal(true);
+                }}
                 style={({ focused }) => [styles.iconBtn, focused && styles.btnFocused]}
               >
                 <Ionicons name="options-outline" size={26} color="#fff" />
@@ -641,7 +752,7 @@ export default function PlayerScreen() {
       </Modal>
 
       {/* Overlay Caricamento / Watchdog */}
-      {buffering && !error && (
+      {buffering && !error && !isEnded && (
         <View style={styles.overlay} pointerEvents="none">
           <ActivityIndicator color="#e8ff47" size="large" />
           <Text style={styles.overlayText}>ripristino segnale…</Text>
@@ -699,16 +810,29 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: 'monospace',
   },
-  progressBarBackground: {
+  progressBarTouchArea: {
     flex: 1,
-    height: 4,
+    paddingVertical: 10, // Area di tocco più comoda
+    justifyContent: 'center',
+  },
+  progressBarBackground: {
+    height: 6,
     backgroundColor: 'rgba(255,255,255,0.3)',
-    borderRadius: 2,
-    overflow: 'hidden',
+    borderRadius: 3,
+    justifyContent: 'center',
   },
   progressBarFill: {
     height: '100%',
     backgroundColor: '#e8ff47',
+    borderRadius: 3,
+  },
+  progressThumb: {
+    position: 'absolute',
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#e8ff47',
+    marginLeft: -7,
   },
 
   // Buttons & Focus (D-Pad / Remote)
