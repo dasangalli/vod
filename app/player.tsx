@@ -14,6 +14,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useTVEventHandler,
   View,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
@@ -78,7 +79,52 @@ export default function PlayerScreen() {
   const seekIntervalRef  = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // -------------------------------------------------------------------------
-  // 1. Orientamento & Tasto Back Hardware
+  // 1. Gestione Auto-Hide Controlli
+  // -------------------------------------------------------------------------
+  const resetControlsTimer = useCallback(() => {
+    setShowControls(true);
+    if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
+    controlsTimerRef.current = setTimeout(() => {
+      if (!showTracksModal && !isEndedRef.current) {
+        setShowControls(false);
+      }
+    }, CONTROLS_HIDE_DELAY);
+  }, [showTracksModal]);
+
+  // Timer iniziale all'avvio della schermata
+  useEffect(() => {
+    resetControlsTimer();
+  }, [resetControlsTimer]);
+
+  // -------------------------------------------------------------------------
+  // 2. Event Handler Telecomando TV (Android TV / Fire TV)
+  // -------------------------------------------------------------------------
+  useTVEventHandler((evt) => {
+    if (!evt || !evt.eventType) return;
+
+    // Qualsiasi pressione di un tasto sul telecomando fa mostrare i comandi e azzera il timer
+    if (!showControls) {
+      setShowControls(true);
+      resetControlsTimer();
+    } else {
+      resetControlsTimer();
+    }
+
+    // Gestione diretta tasti fisici Media (Play / Pause / FastForward / Rewind)
+    if (evt.eventType === 'playPause' || evt.eventType === 'select') {
+      if (!showControls) {
+        setShowControls(true);
+        resetControlsTimer();
+      }
+    } else if (evt.eventType === 'fastForward') {
+      seekBy(10);
+    } else if (evt.eventType === 'rewind') {
+      seekBy(-10);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // 3. Orientamento & Tasto Back Hardware
   // -------------------------------------------------------------------------
   useEffect(() => {
     if (!isTV) ScreenOrientation.unlockAsync();
@@ -100,7 +146,7 @@ export default function PlayerScreen() {
   }, [showTracksModal]);
 
   // -------------------------------------------------------------------------
-  // 2. Comunicazione JS: Ricezione Eventi da HLS.js (WebView)
+  // 4. Comunicazione JS: Ricezione Eventi da HLS.js (WebView)
   // -------------------------------------------------------------------------
   const handleWebViewMessage = (eventData: string) => {
     try {
@@ -115,6 +161,7 @@ export default function PlayerScreen() {
             setError(false);
             lastProgressRef.current = Date.now();
             retryCountRef.current = 0;
+            resetControlsTimer();
           } else if (msg.status === 'loading') {
             if (!isEndedRef.current) {
               bufferingRef.current = true;
@@ -146,6 +193,7 @@ export default function PlayerScreen() {
             setBuffering(false);
             isEndedRef.current = false;
             setIsEnded(false);
+            resetControlsTimer(); // Fai partire il timer di 4s appena il video riproduce
           }
           break;
 
@@ -189,7 +237,7 @@ export default function PlayerScreen() {
   };
 
   // -------------------------------------------------------------------------
-  // 3. Comandi inviati alla WebView
+  // 5. Comandi inviati alla WebView
   // -------------------------------------------------------------------------
   const runJS = (code: string) => {
     webviewRef.current?.injectJavaScript(`${code}; true;`);
@@ -218,7 +266,6 @@ export default function PlayerScreen() {
     resetControlsTimer();
   };
 
-  // Tap diretto sulla barra di avanzamento
   const handleTimelinePress = (event: any) => {
     if (duration <= 0 || progressBarWidth <= 0) return;
 
@@ -242,9 +289,6 @@ export default function PlayerScreen() {
     setSelectedSubId(index);
   };
 
-  // -------------------------------------------------------------------------
-  // 4. Gestione Visibilità Controlli (Toggle & Auto-Hide)
-  // -------------------------------------------------------------------------
   const toggleControls = () => {
     if (showControls) {
       if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
@@ -255,18 +299,8 @@ export default function PlayerScreen() {
     }
   };
 
-  const resetControlsTimer = () => {
-    setShowControls(true);
-    if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
-    controlsTimerRef.current = setTimeout(() => {
-      if (!showTracksModal && !isEndedRef.current) {
-        setShowControls(false);
-      }
-    }, CONTROLS_HIDE_DELAY);
-  };
-
   // -------------------------------------------------------------------------
-  // 5. Watchdog e Auto-Retry
+  // 6. Watchdog e Auto-Retry
   // -------------------------------------------------------------------------
   const forceReload = () => {
     errorRef.current = false;
@@ -323,7 +357,7 @@ export default function PlayerScreen() {
   }, [currentTime, isPlaying, duration]);
 
   // -------------------------------------------------------------------------
-  // 6. Gestione Pressione Prolungata Avanzamento
+  // 7. Gestione Pressione Prolungata Avanzamento
   // -------------------------------------------------------------------------
   const startSeeking = (seconds: number) => {
     seekBy(seconds);
@@ -348,7 +382,7 @@ export default function PlayerScreen() {
   };
 
   // -------------------------------------------------------------------------
-  // 7. Codice HTML5 + hls.js iniettato nella WebView
+  // 8. Codice HTML5 + hls.js
   // -------------------------------------------------------------------------
   const htmlContent = `
     <!DOCTYPE html>
@@ -498,13 +532,13 @@ export default function PlayerScreen() {
   `;
 
   // -------------------------------------------------------------------------
-  // 8. Render UI
+  // 9. Render UI
   // -------------------------------------------------------------------------
   return (
     <View style={styles.container}>
       <Stack.Screen options={{ headerShown: false }} />
 
-      {/* Motore Video HTML5 hls.js tramite WebView */}
+      {/* WebView con focusable={false} per NON rubare i comandi al telecomando TV */}
       <WebView
         ref={webviewRef}
         originWhitelist={['*']}
@@ -515,10 +549,11 @@ export default function PlayerScreen() {
         javaScriptEnabled={true}
         domStorageEnabled={true}
         mixedContentMode="always"
+        focusable={false}
         onMessage={(e) => handleWebViewMessage(e.nativeEvent.data)}
       />
 
-      {/* Overlay invisibile per mostrare i controlli quando sono nascosti */}
+      {/* Overlay invisibile per catturare i clic quando i comandi sono nascosti */}
       {!showControls && (
         <Pressable
           style={StyleSheet.absoluteFillObject}
@@ -541,6 +576,7 @@ export default function PlayerScreen() {
           <View style={styles.topBar}>
             <Pressable
               focusable={true}
+              onFocus={resetControlsTimer}
               onPress={(e) => {
                 e.stopPropagation();
                 router.back();
@@ -557,8 +593,10 @@ export default function PlayerScreen() {
             {/* Timeline Progress Interattiva */}
             <View style={styles.timelineRow}>
               <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
-              
+
               <Pressable
+                focusable={true}
+                onFocus={resetControlsTimer}
                 style={styles.progressBarTouchArea}
                 onPress={(e) => {
                   e.stopPropagation();
@@ -573,7 +611,6 @@ export default function PlayerScreen() {
                       { width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` },
                     ]}
                   />
-                  {/* Pallino indicatore della posizione attuale */}
                   {duration > 0 && (
                     <View
                       style={[
@@ -594,6 +631,7 @@ export default function PlayerScreen() {
                 {/* Indietro -10s */}
                 <Pressable
                   focusable={true}
+                  onFocus={resetControlsTimer}
                   onPressIn={(e) => {
                     e.stopPropagation();
                     startSeeking(-10);
@@ -604,9 +642,11 @@ export default function PlayerScreen() {
                   <Ionicons name="play-back" size={26} color="#fff" />
                 </Pressable>
 
-                {/* Play / Pausa / Replay */}
+                {/* Play / Pausa / Replay (FOCUS PREFERITO PER TV) */}
                 <Pressable
                   focusable={true}
+                  hasTVPreferredFocus={true}
+                  onFocus={resetControlsTimer}
                   onPress={(e) => {
                     e.stopPropagation();
                     togglePlay();
@@ -623,6 +663,7 @@ export default function PlayerScreen() {
                 {/* Avanti +10s */}
                 <Pressable
                   focusable={true}
+                  onFocus={resetControlsTimer}
                   onPressIn={(e) => {
                     e.stopPropagation();
                     startSeeking(10);
@@ -637,6 +678,7 @@ export default function PlayerScreen() {
               {/* Menu Audio & Sottotitoli */}
               <Pressable
                 focusable={true}
+                onFocus={resetControlsTimer}
                 onPress={(e) => {
                   e.stopPropagation();
                   setShowTracksModal(true);
@@ -663,6 +705,7 @@ export default function PlayerScreen() {
               <Text style={styles.modalTitle}>Audio e Sottotitoli</Text>
               <Pressable
                 focusable={true}
+                hasTVPreferredFocus={true}
                 onPress={() => setShowTracksModal(false)}
                 style={({ focused }) => [styles.closeBtn, focused && styles.btnFocused]}
               >
@@ -812,7 +855,7 @@ const styles = StyleSheet.create({
   },
   progressBarTouchArea: {
     flex: 1,
-    paddingVertical: 10, // Area di tocco più comoda
+    paddingVertical: 10,
     justifyContent: 'center',
   },
   progressBarBackground: {
@@ -864,8 +907,8 @@ const styles = StyleSheet.create({
   },
   btnFocused: {
     borderColor: '#e8ff47',
-    backgroundColor: 'rgba(232, 255, 71, 0.25)',
-    transform: [{ scale: 1.1 }],
+    backgroundColor: 'rgba(232, 255, 71, 0.35)',
+    transform: [{ scale: 1.15 }],
   },
 
   // Overlay Feedback Seek (+10s / -10s)
