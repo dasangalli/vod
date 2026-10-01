@@ -25,11 +25,7 @@ const BASE_URL = 'http://129.153.47.200:8081';
 const { width } = Dimensions.get('window');
 const isTV = Platform.isTV || width >= 1280;
 
-const WATCHDOG_INTERVAL_MS = 1000;
-const STALL_THRESHOLD_MS   = 12000;
-const RELOAD_COOLDOWN_MS   = 20000;
-const RETRY_DELAYS         = [5000, 10000, 20000, 30000];
-const CONTROLS_HIDE_DELAY  = 4000;
+const CONTROLS_HIDE_DELAY = 4000;
 
 export default function PlayerScreen() {
   useKeepAwake();
@@ -40,18 +36,22 @@ export default function PlayerScreen() {
   const webviewRef = useRef<WebView>(null);
 
   // Stati UI
-  const [buffering, setBuffering]         = useState(true);
-  const [error, setError]                 = useState(false);
-  const [retryCount, setRetryCount]       = useState(0);
-  const [showControls, setShowControls]   = useState(true);
-  const [isPlaying, setIsPlaying]         = useState(true);
-  const [isEnded, setIsEnded]             = useState(false);
-  const [currentTime, setCurrentTime]     = useState(0);
-  const [duration, setDuration]           = useState(0);
+  const [buffering, setBuffering]               = useState(true);
+  const [error, setError]                       = useState(false);
+  const [showControls, setShowControls]         = useState(true);
+  const [isPlaying, setIsPlaying]               = useState(true);
+  const [isEnded, setIsEnded]                   = useState(false);
+  const [currentTime, setCurrentTime]           = useState(0);
+  const [duration, setDuration]                 = useState(0);
   const [progressBarWidth, setProgressBarWidth] = useState(0);
 
   // Modal Audio & Sottotitoli
-  const [showTracksModal, setShowTracksModal] = useState(false);
+  const [showTracksModal, setShowTracksModal]   = useState(false);
+  const showTracksModalRef                      = useRef(showTracksModal);
+  useEffect(() => {
+    showTracksModalRef.current = showTracksModal;
+  }, [showTracksModal]);
+
   const [audioTracks, setAudioTracks]         = useState<any[]>([]);
   const [selectedAudioId, setSelectedAudioId] = useState<number | null>(null);
   const [subTracks, setSubTracks]             = useState<any[]>([]);
@@ -60,37 +60,26 @@ export default function PlayerScreen() {
   // Feedback Seek (+10s / -10s)
   const [seekFeedbackText, setSeekFeedbackText] = useState<string | null>(null);
 
-  // Ref per Watchdog
-  const lastTimeRef      = useRef<number>(0);
-  const lastProgressRef  = useRef<number>(Date.now());
-  const lastReloadRef    = useRef<number>(0);
-  const bufferingRef     = useRef<boolean>(true);
-  const errorRef         = useRef<boolean>(false);
+  // Ref per gestione stato sincrono
   const isEndedRef       = useRef<boolean>(false);
-  const retryCountRef    = useRef<number>(0);
-
-  // Ref Timer
-  const watchdogRef      = useRef<ReturnType<typeof setInterval> | null>(null);
-  const retryRef         = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seekTimerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
   const holdTimerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seekIntervalRef  = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // -------------------------------------------------------------------------
-  // 1. Gestione Auto-Hide Controlli (4 secondi)
+  // 1. Auto-Hide Controlli (4 secondi)
   // -------------------------------------------------------------------------
   const resetControlsTimer = useCallback(() => {
     setShowControls(true);
     if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
     controlsTimerRef.current = setTimeout(() => {
-      if (!showTracksModal && !isEndedRef.current) {
+      if (!showTracksModalRef.current && !isEndedRef.current) {
         setShowControls(false);
       }
     }, CONTROLS_HIDE_DELAY);
-  }, [showTracksModal]);
+  }, []);
 
-  // Avvio timer all'apertura dello schermo
   useEffect(() => {
     resetControlsTimer();
     return () => {
@@ -134,23 +123,16 @@ export default function PlayerScreen() {
       switch (msg.type) {
         case 'STATUS':
           if (msg.status === 'readyToPlay') {
-            bufferingRef.current = false;
-            errorRef.current = false;
             setBuffering(false);
             setError(false);
-            lastProgressRef.current = Date.now();
-            retryCountRef.current = 0;
             resetControlsTimer();
           } else if (msg.status === 'loading') {
             if (!isEndedRef.current) {
-              bufferingRef.current = true;
               setBuffering(true);
             }
           } else if (msg.status === 'error') {
-            errorRef.current = true;
             setError(true);
             setBuffering(false);
-            scheduleRetry();
           }
           break;
 
@@ -159,8 +141,7 @@ export default function PlayerScreen() {
           if (msg.duration) setDuration(msg.duration);
           setIsPlaying(!msg.paused);
 
-          if (!msg.paused && msg.currentTime > 0 && bufferingRef.current) {
-            bufferingRef.current = false;
+          if (!msg.paused && msg.currentTime > 0) {
             setBuffering(false);
           }
           break;
@@ -168,7 +149,6 @@ export default function PlayerScreen() {
         case 'PLAYING_CHANGE':
           setIsPlaying(msg.isPlaying);
           if (msg.isPlaying) {
-            bufferingRef.current = false;
             setBuffering(false);
             isEndedRef.current = false;
             setIsEnded(false);
@@ -180,7 +160,6 @@ export default function PlayerScreen() {
           isEndedRef.current = true;
           setIsEnded(true);
           setIsPlaying(false);
-          bufferingRef.current = false;
           setBuffering(false);
           setShowControls(true);
           break;
@@ -216,7 +195,7 @@ export default function PlayerScreen() {
   };
 
   // -------------------------------------------------------------------------
-  // 4. Comandi inviati alla WebView
+  // 4. Comandi Player
   // -------------------------------------------------------------------------
   const runJS = (code: string) => {
     webviewRef.current?.injectJavaScript(`${code}; true;`);
@@ -278,66 +257,6 @@ export default function PlayerScreen() {
     }
   };
 
-  // -------------------------------------------------------------------------
-  // 5. Watchdog e Auto-Retry
-  // -------------------------------------------------------------------------
-  const forceReload = () => {
-    errorRef.current = false;
-    bufferingRef.current = true;
-    isEndedRef.current = false;
-    setIsEnded(false);
-    setError(false);
-    setBuffering(true);
-    lastProgressRef.current = Date.now();
-    lastTimeRef.current = 0;
-    runJS(`window.loadStream("${playlistUrl}")`);
-  };
-
-  const scheduleRetry = () => {
-    if (retryRef.current) clearTimeout(retryRef.current);
-    const count = retryCountRef.current;
-    const delay = RETRY_DELAYS[Math.min(count, RETRY_DELAYS.length - 1)];
-    retryCountRef.current += 1;
-    setRetryCount(retryCountRef.current);
-
-    retryRef.current = setTimeout(() => forceReload(), delay);
-  };
-
-  useEffect(() => {
-    watchdogRef.current = setInterval(() => {
-      if (errorRef.current || !isPlaying || isEndedRef.current) return;
-      if (duration > 0 && currentTime >= duration - 1.5) return;
-
-      const now = Date.now();
-      if (currentTime !== lastTimeRef.current) {
-        lastTimeRef.current = currentTime;
-        lastProgressRef.current = now;
-        if (bufferingRef.current) {
-          bufferingRef.current = false;
-          setBuffering(false);
-        }
-        return;
-      }
-
-      const elapsed = now - lastProgressRef.current;
-      if (elapsed > STALL_THRESHOLD_MS) {
-        if (now - lastReloadRef.current < RELOAD_COOLDOWN_MS) return;
-        lastReloadRef.current = now;
-        forceReload();
-      }
-    }, WATCHDOG_INTERVAL_MS);
-
-    return () => {
-      if (watchdogRef.current) clearInterval(watchdogRef.current);
-      if (retryRef.current) clearTimeout(retryRef.current);
-      if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
-      stopSeeking();
-    };
-  }, [currentTime, isPlaying, duration]);
-
-  // -------------------------------------------------------------------------
-  // 6. Avanzamento Veloce Prolungato
-  // -------------------------------------------------------------------------
   const startSeeking = (seconds: number) => {
     seekBy(seconds);
     holdTimerRef.current = setTimeout(() => {
@@ -361,7 +280,7 @@ export default function PlayerScreen() {
   };
 
   // -------------------------------------------------------------------------
-  // 7. Codice HTML5 + hls.js
+  // 5. HTML5 Player + HLS.js (Gestione errori nativa)
   // -------------------------------------------------------------------------
   const htmlContent = `
     <!DOCTYPE html>
@@ -436,6 +355,7 @@ export default function PlayerScreen() {
               postRN({ type: 'SUBTITLE_SWITCHED', id: data.id });
             });
 
+            // Gestione automatica e trasparente degli errori da parte di HLS.js
             hls.on(Hls.Events.ERROR, function(event, data) {
               if (data.fatal) {
                 if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
@@ -511,13 +431,13 @@ export default function PlayerScreen() {
   `;
 
   // -------------------------------------------------------------------------
-  // 8. Render UI
+  // 6. UI Render
   // -------------------------------------------------------------------------
   return (
     <View style={styles.container}>
       <Stack.Screen options={{ headerShown: false }} />
 
-      {/* WebView */}
+      {/* WebView video isolata senza focus */}
       <WebView
         ref={webviewRef}
         originWhitelist={['*']}
@@ -532,7 +452,7 @@ export default function PlayerScreen() {
         onMessage={(e) => handleWebViewMessage(e.nativeEvent.data)}
       />
 
-      {/* Clic / Focus su schermo intero a comandi nascosti */}
+      {/* Clic / Focus a comandi nascosti */}
       {!showControls && (
         <Pressable
           style={StyleSheet.absoluteFillObject}
@@ -543,17 +463,16 @@ export default function PlayerScreen() {
         />
       )}
 
-      {/* Feedback temporaneo avanzamento (+10s / -10s) */}
+      {/* Badge feedback +10s / -10s */}
       {seekFeedbackText && (
         <View style={styles.seekFeedbackOverlay} pointerEvents="none">
           <Text style={styles.seekFeedbackText}>{seekFeedbackText}</Text>
         </View>
       )}
 
-      {/* Overlay Controlli Stile Netflix */}
+      {/* Overlay Controlli */}
       {showControls && (
         <Pressable style={styles.controlsContainer} onPress={toggleControls}>
-          {/* Top Bar */}
           <View style={styles.topBar}>
             <Pressable
               focusable={true}
@@ -569,9 +488,7 @@ export default function PlayerScreen() {
             <Text style={styles.channelTitle}>CANALE {id}</Text>
           </View>
 
-          {/* Bottom Bar Controls */}
           <View style={styles.bottomBar}>
-            {/* Timeline Progress */}
             <View style={styles.timelineRow}>
               <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
 
@@ -606,10 +523,8 @@ export default function PlayerScreen() {
               <Text style={styles.timeText}>{formatTime(duration)}</Text>
             </View>
 
-            {/* Pulsanti di azione */}
             <View style={styles.buttonsRow}>
               <View style={styles.leftButtons}>
-                {/* Indietro -10s */}
                 <Pressable
                   focusable={true}
                   onFocus={resetControlsTimer}
@@ -623,7 +538,6 @@ export default function PlayerScreen() {
                   <Ionicons name="play-back" size={26} color="#fff" />
                 </Pressable>
 
-                {/* Play / Pausa / Replay */}
                 <Pressable
                   focusable={true}
                   hasTVPreferredFocus={showControls}
@@ -641,7 +555,6 @@ export default function PlayerScreen() {
                   />
                 </Pressable>
 
-                {/* Avanti +10s */}
                 <Pressable
                   focusable={true}
                   onFocus={resetControlsTimer}
@@ -656,7 +569,6 @@ export default function PlayerScreen() {
                 </Pressable>
               </View>
 
-              {/* Menu Audio & Sottotitoli */}
               <Pressable
                 focusable={true}
                 onFocus={resetControlsTimer}
@@ -673,7 +585,7 @@ export default function PlayerScreen() {
         </Pressable>
       )}
 
-      {/* Modal Selezione Audio & Sottotitoli */}
+      {/* Modal Audio/Sottotitoli */}
       <Modal
         visible={showTracksModal}
         transparent={true}
@@ -695,7 +607,6 @@ export default function PlayerScreen() {
             </View>
 
             <ScrollView contentContainerStyle={styles.columnsContainer}>
-              {/* Colonna Audio */}
               <View style={styles.column}>
                 <Text style={styles.columnHeader}>AUDIO</Text>
                 {audioTracks.length === 0 ? (
@@ -724,7 +635,6 @@ export default function PlayerScreen() {
                 )}
               </View>
 
-              {/* Colonna Sottotitoli */}
               <View style={styles.column}>
                 <Text style={styles.columnHeader}>SOTTOTITOLI</Text>
                 <Pressable
@@ -775,21 +685,19 @@ export default function PlayerScreen() {
         </View>
       </Modal>
 
-      {/* Overlay Caricamento / Watchdog */}
+      {/* Buffering Overlay */}
       {buffering && !error && !isEnded && (
         <View style={styles.overlay} pointerEvents="none">
           <ActivityIndicator color="#e8ff47" size="large" />
-          <Text style={styles.overlayText}>ripristino segnale…</Text>
+          <Text style={styles.overlayText}>caricamento in corso…</Text>
         </View>
       )}
 
-      {/* Overlay Errore Fatale */}
+      {/* Errore Overlay */}
       {error && (
         <View style={styles.overlay} pointerEvents="none">
           <Text style={styles.overlayTextError}>✕</Text>
-          <Text style={styles.overlayText}>
-            segnale assente — ricollegamento {retryCount}…
-          </Text>
+          <Text style={styles.overlayText}>impossibile caricare il contenuto</Text>
         </View>
       )}
     </View>
@@ -800,7 +708,6 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   video: { flex: 1, backgroundColor: '#000' },
 
-  // Control Overlay
   controlsContainer: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -823,7 +730,6 @@ const styles = StyleSheet.create({
     gap: 16,
   },
 
-  // Seek Progress Timeline
   timelineRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -859,7 +765,6 @@ const styles = StyleSheet.create({
     marginLeft: -7,
   },
 
-  // Buttons & Focus
   buttonsRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -892,7 +797,6 @@ const styles = StyleSheet.create({
     transform: [{ scale: 1.15 }],
   },
 
-  // Overlay Feedback Seek (+10s / -10s)
   seekFeedbackOverlay: {
     position: 'absolute',
     top: '45%',
@@ -914,7 +818,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
 
-  // Modal Audio & Sottotitoli
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.85)',
@@ -998,7 +901,6 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
   },
 
-  // Watchdog & Status Overlays
   overlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.85)',
